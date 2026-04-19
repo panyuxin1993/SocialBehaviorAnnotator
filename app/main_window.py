@@ -233,12 +233,13 @@ class MainWindow(QMainWindow):
             self.control_panel.append_log(f"Seek error (frame {frame_index}): {exc}")
             return
 
-        dt_value, unix_value = self.timestamp_service.timestamp_for_frame(frame_index)
-        self.video_panel.set_frame(frame, frame_index, dt_value, unix_value)
+        actual_index = int(self.video_service.current_frame_index)
+        dt_value, unix_value = self.timestamp_service.timestamp_for_frame(actual_index)
+        self.video_panel.set_frame(frame, actual_index, dt_value, unix_value)
         self.control_panel.set_current_frame_image(frame)
-        self.control_panel.set_current_time(frame_index, dt_value, unix_value)
-        self.navigator_panel.set_current_frame(frame_index, self.video_service.total_frames)
-        self.navigator_panel.ethogram.set_playhead(frame_index)
+        self.control_panel.set_current_time(actual_index, dt_value, unix_value)
+        self.navigator_panel.set_current_frame(actual_index, self.video_service.total_frames)
+        self.navigator_panel.ethogram.set_playhead(actual_index)
 
     def _seek_to_datetime(self, dt_text: str) -> None:
         if not self.timestamp_service.timestamps:

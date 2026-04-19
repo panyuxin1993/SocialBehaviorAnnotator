@@ -55,16 +55,24 @@ class VideoService:
 
     def get_frame(self, frame_index: int, prefer_extracted: bool = True) -> np.ndarray:
         if self._use_frame_files and prefer_extracted and self._extracted_frames_dir is not None:
-            frame_path = self._extracted_frames_dir / f"{max(0, min(frame_index, self.total_frames - 1)):08d}.jpg"
+            index = max(0, min(frame_index, self.total_frames - 1))
+            frame_path = self._extracted_frames_dir / f"{index:08d}.jpg"
             frame = cv2.imread(str(frame_path))
             if frame is not None:
-                self.current_frame_index = frame_index
+                self.current_frame_index = int(index)
                 return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         if self.capture is None:
             raise ValueError("No video loaded.")
 
         index = max(0, min(frame_index, max(self.total_frames - 1, 0)))
+        # Fast path for playback: if requesting the immediate next frame, avoid re-seek.
+        if index == self.current_frame_index + 1:
+            ok, frame = self.capture.read()
+            if ok and frame is not None:
+                self.current_frame_index = index
+                return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
         self.capture.set(cv2.CAP_PROP_POS_FRAMES, index)
         ok, frame = self.capture.read()
         if not ok or frame is None:

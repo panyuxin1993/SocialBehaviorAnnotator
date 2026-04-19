@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from time import perf_counter
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
@@ -64,6 +65,9 @@ class NavigatorPanel(QWidget):
         self._current_frame_idx: int = 0
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance_play_frame)
+        self._actual_fps_ema: float | None = None
+        self._actual_last_t: float | None = None
+        self._actual_last_frame: int | None = None
 
         self.previous_btn = QPushButton("Previous event")
         self.next_btn = QPushButton("Next event")
@@ -81,6 +85,9 @@ class NavigatorPanel(QWidget):
         top_row.addWidget(self.jump_input, stretch=1)
         top_row.addWidget(self.previous_btn)
         top_row.addWidget(self.next_btn)
+        self.playback_status_label = QLabel("actual: - fps")
+        self.playback_status_label.setMinimumWidth(110)
+        top_row.addWidget(self.playback_status_label)
         top_row.addWidget(self.status_label)
 
         self.ethogram = EthogramWidget()
@@ -128,6 +135,7 @@ class NavigatorPanel(QWidget):
 
     def _on_playback_speed_changed(self, _value: float) -> None:
         self._update_play_timer_interval()
+        self._refresh_playback_status()
 
     def _update_play_timer_interval(self) -> None:
         fps = max(self._playback_fps, 0.001)
@@ -135,6 +143,35 @@ class NavigatorPanel(QWidget):
         ms = int(round(1000.0 / (fps * speed)))
         ms = max(1, min(ms, 2000))
         self._play_timer.setInterval(ms)
+
+    def _refresh_playback_status(self) -> None:
+        if self._actual_fps_ema is None:
+            self.playback_status_label.setText("actual: - fps")
+        else:
+            self.playback_status_label.setText(f"actual: {self._actual_fps_ema:.2f} fps")
+
+    def _reset_actual_fps_tracking(self) -> None:
+        self._actual_fps_ema = None
+        self._actual_last_t = perf_counter()
+        self._actual_last_frame = int(self._current_frame_idx)
+
+    def _update_actual_fps(self, frame_index: int) -> None:
+        now = perf_counter()
+        if self._actual_last_t is None or self._actual_last_frame is None:
+            self._actual_last_t = now
+            self._actual_last_frame = int(frame_index)
+            return
+        dt = now - self._actual_last_t
+        df = int(frame_index) - int(self._actual_last_frame)
+        self._actual_last_t = now
+        self._actual_last_frame = int(frame_index)
+        if dt <= 0 or df <= 0:
+            return
+        inst = float(df) / float(dt)
+        if self._actual_fps_ema is None:
+            self._actual_fps_ema = inst
+        else:
+            self._actual_fps_ema = 0.20 * inst + 0.80 * self._actual_fps_ema
 
     def start_playback(self) -> None:
         last = max(0, self.total_frames - 1)
@@ -144,15 +181,18 @@ class NavigatorPanel(QWidget):
             return
         self._playing = True
         self._update_play_timer_interval()
+        self._reset_actual_fps_tracking()
         self._play_timer.start()
         self.play_btn.setEnabled(False)
         self.pause_btn.setEnabled(True)
+        self._refresh_playback_status()
 
     def pause_playback(self) -> None:
         self._playing = False
         self._play_timer.stop()
         self.play_btn.setEnabled(True)
         self.pause_btn.setEnabled(False)
+        self._refresh_playback_status()
 
     def toggle_play_pause(self) -> None:
         if self._playing:
@@ -211,9 +251,12 @@ class NavigatorPanel(QWidget):
     def set_current_frame(self, frame_index: int, total_frames: int) -> None:
         self.total_frames = max(1, total_frames)
         self._current_frame_idx = max(0, min(int(frame_index), self.total_frames - 1))
+        if self._playing:
+            self._update_actual_fps(self._current_frame_idx)
         self.slider.blockSignals(True)
         self.slider.setRange(0, max(0, self.total_frames - 1))
         self.slider.setValue(self._current_frame_idx)
         self.slider.blockSignals(False)
+        self._refresh_playback_status()
         self.status_label.setText(f"frame: {self._current_frame_idx} / {self.total_frames - 1}")
 

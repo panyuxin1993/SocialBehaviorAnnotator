@@ -75,12 +75,22 @@ If valid, event is appended and persisted.
 ## 3) Navigator + Ethogram (left, lower area)
 
 ### Navigator row
+- `Play` / `Pause` buttons control timeline playback.
+- `× speed` input controls playback speed relative to the video FPS:
+  - `1.00` = real-time frame rate
+  - values `< 1` slow down playback
+  - values `> 1` speed up playback
 - Slider to scrub through frames.
 - Text input:
   - frame number (integer), or
   - datetime (`YYYY-MM-DD HH:MM:SS[.ffffff]`) to jump to nearest timestamped frame.
-- `Previous event` / `Next event` buttons jump to neighboring event starts.
+- `Previous event` / `Next event` buttons jump by event start **time** (nearest previous/next start relative to current time).
 - Frame status indicator.
+
+Keyboard shortcuts (when focus is not in a text/table/spin input):
+- `Space`: toggle play/pause
+- `Left`: step one frame backward
+- `Right`: step one frame forward
 
 ### Ethogram panel
 - Displays event spans over the full video timeline.
