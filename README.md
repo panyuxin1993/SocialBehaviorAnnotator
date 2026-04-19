@@ -6,10 +6,9 @@ Desktop toolbox for manual social-behavior annotation from video and timestamps.
 - Load a video file (`.mp4`, `.avi`, `.mov`, `.mkv`)
 - Load timestamps from `.npy` or `.json`
 - Load or create annotation table in `.csv` / `.xlsx`
-- Three-panel GUI:
-  - main video with datetime/unix/frame status
-  - right-side event controls and role assignment table
-  - bottom navigator with event jumps and ethogram
+- GUI layout:
+  - **Left:** video (top) and navigator + ethogram (bottom)
+  - **Right:** full-height event controls, role table, and a bottom **Console** log
 - Save event annotations back to the table format
 - Optional full-frame extraction fallback for slow random video access
 
@@ -30,16 +29,16 @@ pip install PySide6 opencv-python numpy pandas openpyxl
 ## Launch
 
 ```bash
-python main.py
+python -m app
 ```
 
 ## Quick Start
 1. Launch app.
 2. `File -> Open project inputs`.
-3. Select:
+3. In the dialog, set or browse to:
    - video file
    - timestamp file (`.npy` or `.json`)
-   - annotation table (`.csv`/`.xlsx`) or choose a new output path
+   - annotation table (use **Open…** for an existing `.csv`/`.xlsx`, or **Save as new…** for a new file)
 4. If a new table is created, enter comma-separated animal names when prompted.
 5. Navigate frames with slider or jump box.
 6. In right panel:

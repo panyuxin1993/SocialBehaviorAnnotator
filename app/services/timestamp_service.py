@@ -19,7 +19,7 @@ class TimestampService:
             values = np.load(path)
             if values.ndim > 1:
                 values = values.reshape(-1)
-            self._unix_timestamps = [float(v) for v in values.tolist()]
+            self._unix_timestamps = [self._normalize_unix_seconds(float(v)) for v in values.tolist()]
             return
 
         if suffix == ".json":
@@ -32,22 +32,67 @@ class TimestampService:
 
     def _parse_json(self, payload: object) -> list[float]:
         if isinstance(payload, list):
-            return [float(v) for v in payload]
+            if not payload:
+                raise ValueError("Timestamp json list is empty.")
+            first = payload[0]
+            if isinstance(first, dict):
+                if "cam_frame_time" in first:
+                    return [
+                        self._normalize_unix_seconds(float(item["cam_frame_time"]))
+                        for item in payload
+                        if isinstance(item, dict) and "cam_frame_time" in item
+                    ]
+                if "timestamp" in first:
+                    return [
+                        self._normalize_unix_seconds(float(item["timestamp"]))
+                        for item in payload
+                        if isinstance(item, dict) and "timestamp" in item
+                    ]
+                raise ValueError(
+                    "Unsupported json list[dict] timestamp format. "
+                    "Expected key 'cam_frame_time' or 'timestamp'."
+                )
+            return [self._normalize_unix_seconds(float(v)) for v in payload]
 
         if isinstance(payload, dict):
             if "timestamps" in payload and isinstance(payload["timestamps"], list):
-                return [float(v) for v in payload["timestamps"]]
+                return [self._normalize_unix_seconds(float(v)) for v in payload["timestamps"]]
             if "unix_timestamps" in payload and isinstance(payload["unix_timestamps"], list):
-                return [float(v) for v in payload["unix_timestamps"]]
+                return [self._normalize_unix_seconds(float(v)) for v in payload["unix_timestamps"]]
 
-        raise ValueError("Unsupported json timestamp format. Expected list or {timestamps: [...]} payload.")
+        raise ValueError(
+            "Unsupported json timestamp format. Expected one of: "
+            "list[number], list[{cam_frame_time|timestamp}], or {timestamps|unix_timestamps: [...]}"
+        )
+
+    @staticmethod
+    def _normalize_unix_seconds(value: float) -> float:
+        """
+        Normalize unix timestamps to seconds.
+        Accepts common units:
+        - seconds (~1e9..1e10)
+        - milliseconds (~1e12..1e13)
+        - microseconds (~1e15..1e16)
+        - nanoseconds (~1e18..1e19)
+        """
+        abs_value = abs(value)
+        if abs_value >= 1e18:  # nanoseconds
+            return value / 1e9
+        if abs_value >= 1e15:  # microseconds
+            return value / 1e6
+        if abs_value >= 1e12:  # milliseconds
+            return value / 1e3
+        return value
 
     def timestamp_for_frame(self, frame_index: int) -> tuple[str, float]:
         if not self._unix_timestamps:
             return "", 0.0
         idx = max(0, min(frame_index, len(self._unix_timestamps) - 1))
         unix_value = float(self._unix_timestamps[idx])
-        dt_value = datetime.fromtimestamp(unix_value).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        try:
+            dt_value = datetime.fromtimestamp(unix_value).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        except (OverflowError, OSError, ValueError):
+            dt_value = ""
         return dt_value, unix_value
 
     @property

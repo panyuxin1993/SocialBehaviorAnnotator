@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from app.models.schema import ANNOTATION_COLUMNS, AnnotationSchema, METADATA_COLUMNS
+from app.models.schema import ANNOTATION_COLUMNS, AnnotationSchema, METADATA_COLUMNS, ROLE_COLUMNS
 
 
 class TableStore:
@@ -17,7 +17,7 @@ class TableStore:
 
         if suffix == ".csv":
             df = pd.read_csv(path)
-            names = sorted([str(v) for v in df.get("animal_name", pd.Series(dtype=object)).dropna().unique().tolist()])
+            names = self._infer_animal_names(df)
             return self._normalize(df), names
 
         if suffix in {".xlsx", ".xls"}:
@@ -27,7 +27,7 @@ class TableStore:
             else:
                 df = xls.parse(xls.sheet_names[0])
 
-            names = sorted([str(v) for v in df.get("animal_name", pd.Series(dtype=object)).dropna().unique().tolist()])
+            names = self._infer_animal_names(df)
             if self.schema.metadata_sheet_name in xls.sheet_names:
                 metadata = xls.parse(self.schema.metadata_sheet_name)
                 if "animal_names" in metadata.columns and not metadata.empty:
@@ -65,4 +65,17 @@ class TableStore:
             if col not in df.columns:
                 df[col] = None
         return df[ANNOTATION_COLUMNS]
+
+    def _infer_animal_names(self, frame: pd.DataFrame) -> list[str]:
+        names: set[str] = set()
+        for role in ROLE_COLUMNS:
+            if role not in frame.columns:
+                continue
+            series = frame[role].dropna().astype(str)
+            for value in series.tolist():
+                for token in value.split(","):
+                    name = token.strip()
+                    if name:
+                        names.add(name)
+        return sorted(names)
 

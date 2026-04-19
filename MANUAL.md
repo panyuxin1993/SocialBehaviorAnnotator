@@ -4,15 +4,14 @@ This manual describes each GUI component in the Social Behavior Annotator.
 
 ## Main Window Layout
 
-The window has three areas:
+The window is split into two columns:
 
-1. **Top-left: Video Panel**
-2. **Top-right: Control Panel**
-3. **Bottom: Navigator + Ethogram**
+1. **Left column (full height)** — **Video panel** on top and **Navigator + Ethogram** along the bottom of that column.
+2. **Right column (full height)** — **Control panel** (annotation UI) from top to bottom, with a **Console** at the bottom of the column.
 
 ---
 
-## 1) Video Panel (Top-left)
+## 1) Video Panel (left, upper area)
 
 ### Status bar
 Shows current frame time and position:
@@ -27,7 +26,7 @@ Shows current frame time and position:
 
 ---
 
-## 2) Control Panel (Top-right)
+## 2) Control Panel (right, full height)
 
 ### Zoom view
 - Shows a zoomed crop centered at the last click location.
@@ -68,9 +67,12 @@ Validation:
 
 If valid, event is appended and persisted.
 
+### Console
+- Read-only log at the bottom of the right column (load/save, events, errors).
+
 ---
 
-## 3) Bottom Navigator + Ethogram
+## 3) Navigator + Ethogram (left, lower area)
 
 ### Navigator row
 - Slider to scrub through frames.
@@ -89,8 +91,8 @@ If valid, event is appended and persisted.
 ## File Menu Actions
 
 - **Open project inputs**
-  - choose video + timestamp + annotation table
-  - if table path is new, prompts for animal names
+  - opens a single dialog with three fields (video, timestamps, annotation table); type paths or use **Browse…** / **Open…** / **Save as new…**
+  - if the annotation path does not exist yet, you are prompted for animal names when loading
 - **Extract all frames (fallback mode)**
   - saves frames to `workspace/<video_id>/frames`
   - enables frame-file based seeking

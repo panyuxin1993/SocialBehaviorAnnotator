@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QFileDialog,
+    QDialog,
     QInputDialog,
     QMainWindow,
     QMessageBox,
@@ -13,12 +13,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.gui.open_project_dialog import OpenProjectDialog
 from app.gui.video_panel import VideoPanel
 from app.gui.control_panel import ControlPanel
 from app.gui.navigator_panel import NavigatorPanel
+from app.gui.event_type_editor import EventTypeEditor
+from app.gui.animal_list_editor import AnimalListEditor
 from app.services.annotation_service import AnnotationService
 from app.services.timestamp_service import TimestampService
 from app.services.video_service import VideoService
+
+
 
 
 class MainWindow(QMainWindow):
@@ -42,18 +47,20 @@ class MainWindow(QMainWindow):
     def _init_layout(self) -> None:
         central = QWidget()
         root_layout = QVBoxLayout(central)
+        root_layout.setContentsMargins(0, 0, 0, 0)
 
-        top_splitter = QSplitter(Qt.Horizontal)
-        top_splitter.addWidget(self.video_panel)
-        top_splitter.addWidget(self.control_panel)
-        top_splitter.setStretchFactor(0, 3)
-        top_splitter.setStretchFactor(1, 2)
+        # Left column: video on top, navigator at bottom; right column: full-height control panel + console
+        left_column = QSplitter(Qt.Vertical)
+        left_column.addWidget(self.video_panel)
+        left_column.addWidget(self.navigator_panel)
+        left_column.setStretchFactor(0, 4)
+        left_column.setStretchFactor(1, 1)
 
-        main_splitter = QSplitter(Qt.Vertical)
-        main_splitter.addWidget(top_splitter)
-        main_splitter.addWidget(self.navigator_panel)
-        main_splitter.setStretchFactor(0, 4)
-        main_splitter.setStretchFactor(1, 1)
+        main_splitter = QSplitter(Qt.Horizontal)
+        main_splitter.addWidget(left_column)
+        main_splitter.addWidget(self.control_panel)
+        main_splitter.setStretchFactor(0, 3)
+        main_splitter.setStretchFactor(1, 2)
 
         root_layout.addWidget(main_splitter)
         self.setCentralWidget(central)
@@ -80,22 +87,40 @@ class MainWindow(QMainWindow):
         save_action = file_menu.addAction("Save annotations")
         save_action.triggered.connect(self._save_annotations)
 
+        annotation_menu = self.menuBar().addMenu("Annotation")
+        edit_types_action = annotation_menu.addAction("Event types…")
+        edit_types_action.triggered.connect(self._edit_event_types)
+        edit_animals_action = annotation_menu.addAction("Animals…")
+        edit_animals_action.triggered.connect(self._edit_animals)
+
     def _open_project_inputs(self) -> None:
-        video_path, _ = QFileDialog.getOpenFileName(self, "Select video", "", "Video Files (*.mp4 *.avi *.mov *.mkv)")
+        dialog = OpenProjectDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        video_path = dialog.video_path()
+        timestamp_path = dialog.timestamp_path()
+        table_path = dialog.annotation_path()
+
         if not video_path:
+            QMessageBox.warning(self, "Missing video", "Please set the video file path.")
             return
-        timestamp_path, _ = QFileDialog.getOpenFileName(
-            self, "Select timestamp file", "", "Timestamp Files (*.npy *.json)"
-        )
+        if not Path(video_path).is_file():
+            QMessageBox.warning(self, "Invalid video", f"Video file not found:\n{video_path}")
+            return
         if not timestamp_path:
+            QMessageBox.warning(self, "Missing timestamps", "Please set the timestamp file path.")
             return
-        table_path, _ = QFileDialog.getOpenFileName(
-            self, "Select annotation table or cancel for new", "", "Tables (*.csv *.xlsx *.xls)"
-        )
+        if not Path(timestamp_path).is_file():
+            QMessageBox.warning(self, "Invalid timestamps", f"Timestamp file not found:\n{timestamp_path}")
+            return
         if not table_path:
-            table_path, _ = QFileDialog.getSaveFileName(self, "Create annotation table", "", "Tables (*.csv *.xlsx)")
-            if not table_path:
-                return
+            QMessageBox.warning(
+                self,
+                "Missing annotation table",
+                "Please set the annotation table path (open existing or Save as new).",
+            )
+            return
 
         try:
             self.video_service.load_video(video_path)
@@ -114,16 +139,31 @@ class MainWindow(QMainWindow):
 
             self.annotation_service.load_or_create_table(table_path, animal_names)
             self.control_panel.set_animal_names(self.annotation_service.animal_names)
+            self.navigator_panel.ethogram.set_data(
+                self.annotation_service.annotations,
+                0,
+                self.video_service.total_frames,
+                self.timestamp_service.timestamps,
+                animal_names=self.annotation_service.animal_names,
+                fps=self.video_service.fps,
+                type_colors=self.control_panel.event_type_color_map(),
+                type_legend_labels=self.control_panel.event_type_legend_label_map(),
+            )
             self._seek_to_frame(0)
             self.statusBar().showMessage("Project loaded.", 4000)
+            self.control_panel.append_log(f"Project loaded: video={video_path}")
+            self.control_panel.append_log(f"Timestamps: {timestamp_path}")
+            self.control_panel.append_log(f"Annotations: {table_path}")
         except Exception as exc:
             QMessageBox.critical(self, "Failed to load project", str(exc))
+            self.control_panel.append_log(f"ERROR: load failed — {exc}")
 
     def _seek_to_frame(self, frame_index: int) -> None:
         try:
             frame = self.video_service.get_frame(frame_index)
         except Exception as exc:
             QMessageBox.warning(self, "Seek error", str(exc))
+            self.control_panel.append_log(f"Seek error (frame {frame_index}): {exc}")
             return
 
         dt_value, unix_value = self.timestamp_service.timestamp_for_frame(frame_index)
@@ -131,11 +171,7 @@ class MainWindow(QMainWindow):
         self.control_panel.set_current_frame_image(frame)
         self.control_panel.set_current_time(frame_index, dt_value, unix_value)
         self.navigator_panel.set_current_frame(frame_index, self.video_service.total_frames)
-        self.navigator_panel.ethogram.set_data(
-            self.annotation_service.annotations,
-            frame_index,
-            self.video_service.total_frames,
-        )
+        self.navigator_panel.ethogram.set_playhead(frame_index)
 
     def _seek_to_datetime(self, dt_text: str) -> None:
         if not self.timestamp_service.timestamps:
@@ -152,19 +188,44 @@ class MainWindow(QMainWindow):
         )
         self._seek_to_frame(closest_idx)
 
+    def _max_video_frame_index(self) -> int | None:
+        """Last valid frame index for the loaded video (None if unknown)."""
+        tf = self.video_service.total_frames
+        if tf <= 0:
+            return None
+        return max(0, tf - 1)
+
     def _jump_to_next_event(self) -> None:
-        frame_index = self.annotation_service.next_event_start_frame(self.video_service.current_frame_index)
+        max_idx = self._max_video_frame_index()
+        frame_index = self.annotation_service.next_event_start_frame(
+            self.video_service.current_frame_index,
+            self.timestamp_service.timestamps,
+            max_frame_index=max_idx,
+        )
         if frame_index is not None:
             self._seek_to_frame(frame_index)
-            event = self.annotation_service.find_event_by_start_frame(frame_index)
+            event = self.annotation_service.find_event_by_start_frame(
+                frame_index,
+                self.timestamp_service.timestamps,
+                max_frame_index=max_idx,
+            )
             if event is not None:
                 self.control_panel.populate_from_event(event)
 
     def _jump_to_previous_event(self) -> None:
-        frame_index = self.annotation_service.previous_event_start_frame(self.video_service.current_frame_index)
+        max_idx = self._max_video_frame_index()
+        frame_index = self.annotation_service.previous_event_start_frame(
+            self.video_service.current_frame_index,
+            self.timestamp_service.timestamps,
+            max_frame_index=max_idx,
+        )
         if frame_index is not None:
             self._seek_to_frame(frame_index)
-            event = self.annotation_service.find_event_by_start_frame(frame_index)
+            event = self.annotation_service.find_event_by_start_frame(
+                frame_index,
+                self.timestamp_service.timestamps,
+                max_frame_index=max_idx,
+            )
             if event is not None:
                 self.control_panel.populate_from_event(event)
 
@@ -176,15 +237,68 @@ class MainWindow(QMainWindow):
             self.annotation_service.annotations,
             self.video_service.current_frame_index,
             self.video_service.total_frames,
+            self.timestamp_service.timestamps,
+            animal_names=self.annotation_service.animal_names,
+            fps=self.video_service.fps,
+            type_colors=self.control_panel.event_type_color_map(),
+            type_legend_labels=self.control_panel.event_type_legend_label_map(),
         )
         QMessageBox.information(self, "Saved", f"Event {event.event_id} saved.")
+        self.control_panel.append_log(f"Saved event {event.event_id} ({event.event_type})")
 
     def _save_annotations(self) -> None:
         try:
             self.annotation_service.save()
             self.statusBar().showMessage("Annotations saved.", 3000)
+            self.control_panel.append_log("Annotations saved to disk.")
         except Exception as exc:
             QMessageBox.warning(self, "Save failed", str(exc))
+            self.control_panel.append_log(f"ERROR: save failed — {exc}")
+
+    def _edit_event_types(self) -> None:
+        """Open a dialog to edit the list of event types shown in the control panel."""
+        specs = self.control_panel.event_type_specs()
+        default_csv_dir = ""
+        if self.annotation_service.table_path is not None:
+            default_csv_dir = str(self.annotation_service.table_path.parent)
+        dialog = EventTypeEditor(specs, self, default_csv_dir=default_csv_dir)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        triples = dialog.value_triples()
+        if not triples:
+            return
+        self.control_panel.set_event_type_specs(triples)
+        # Full ``set_data`` (not only ``apply_type_color_map``) so the timeline cache and legend
+        # always rebuild like on project load / save; matches ``type`` column to new overrides.
+        self.navigator_panel.ethogram.set_data(
+            self.annotation_service.annotations,
+            self.video_service.current_frame_index,
+            self.video_service.total_frames,
+            self.timestamp_service.timestamps,
+            animal_names=self.annotation_service.animal_names,
+            fps=self.video_service.fps,
+            type_colors=self.control_panel.event_type_color_map(),
+            type_legend_labels=self.control_panel.event_type_legend_label_map(),
+        )
+
+    def _edit_animals(self) -> None:
+        """Open a dialog to edit the list of animals used in the project."""
+        current_animals = list(self.annotation_service.animal_names)
+        dialog = AnimalListEditor(current_animals, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        new_animals = dialog.values()
+        if not new_animals:
+            return
+        self.annotation_service.animal_names = new_animals
+        self.control_panel.set_animal_names(new_animals)
+        # Persist updated animal list metadata when possible.
+        try:
+            self.annotation_service.save()
+            self.statusBar().showMessage("Animal list updated.", 3000)
+        except Exception as exc:
+            # Non-fatal; project can continue even if save fails.
+            self.control_panel.append_log(f"WARNING: failed to save updated animal list — {exc}")
 
     def _extract_frames_mode(self) -> None:
         if self.video_service.video_path is None:
@@ -195,6 +309,8 @@ class MainWindow(QMainWindow):
         try:
             out_dir = self.video_service.enable_frame_extraction_mode(workspace, video_id)
             self.statusBar().showMessage(f"Frame fallback enabled: {out_dir}", 6000)
+            self.control_panel.append_log(f"Frame extraction mode: {out_dir}")
         except Exception as exc:
             QMessageBox.warning(self, "Extraction failed", str(exc))
+            self.control_panel.append_log(f"ERROR: frame extraction — {exc}")
 

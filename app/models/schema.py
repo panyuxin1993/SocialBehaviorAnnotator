@@ -6,27 +6,23 @@ from dataclasses import dataclass
 ROLE_COLUMNS = [
     "initiator",
     "victim",
-    "intervenor",
-    "observer",
     "winner",
     "loser",
+    "intervenor",
+    "observer",
 ]
-
-ROLE_POINT_COLUMNS = [f"{role}_point_xy" for role in ROLE_COLUMNS]
 
 ANNOTATION_COLUMNS = [
     "event_id",
-    "event_type",
+    "date",
+    "start_time",
+    "end_time",
     "start_frame",
     "end_frame",
-    "start_datetime",
-    "end_datetime",
-    "start_unix",
-    "end_unix",
-    "notes",
-    "animal_name",
+    "type",
+    "location",
     *ROLE_COLUMNS,
-    *ROLE_POINT_COLUMNS,
+    "other_notes",
 ]
 
 METADATA_COLUMNS = ["animal_names"]

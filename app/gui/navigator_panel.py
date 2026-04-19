@@ -4,10 +4,13 @@ from datetime import datetime
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QDoubleSpinBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -53,8 +56,61 @@ class NavigatorPanel(QWidget):
 
         self.ethogram = EthogramWidget()
 
+        etho_row = QHBoxLayout()
+        etho_row.addWidget(QLabel("Ethogram ± (s)"))
+        self.ethogram_window_spin = QDoubleSpinBox()
+        self.ethogram_window_spin.setRange(0.5, 86400.0)
+        self.ethogram_window_spin.setDecimals(1)
+        self.ethogram_window_spin.setSingleStep(5.0)
+        self.ethogram_window_spin.setToolTip(
+            "Half-width of the ethogram time window in seconds (each side of the playhead)."
+        )
+        self.ethogram_window_spin.setValue(self.ethogram.window_radius_seconds)
+        self.ethogram_window_spin.valueChanged.connect(self.ethogram.set_window_radius_seconds)
+        etho_row.addWidget(self.ethogram_window_spin)
+        etho_row.addSpacing(12)
+        etho_row.addWidget(QLabel("Legend"))
+        self._legend_scroll = QScrollArea()
+        self._legend_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._legend_scroll.setWidgetResizable(True)
+        self._legend_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._legend_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._legend_scroll.setMaximumHeight(30)
+        self._legend_host = QWidget()
+        self._legend_inner = QHBoxLayout(self._legend_host)
+        self._legend_inner.setContentsMargins(0, 0, 0, 0)
+        self._legend_inner.setSpacing(0)
+        self._legend_scroll.setWidget(self._legend_host)
+        etho_row.addWidget(self._legend_scroll, stretch=1)
+        self.ethogram.legend_items_changed.connect(self._populate_ethogram_legend)
+        self.ethogram.refresh_legend()
+
         layout.addLayout(top_row)
+        layout.addLayout(etho_row)
         layout.addWidget(self.ethogram)
+
+    def _populate_ethogram_legend(self, items: object) -> None:
+        layout = self._legend_inner
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        pairs = list(items) if items is not None else []
+        for name, color_hex in pairs:
+            group = QWidget()
+            h = QHBoxLayout(group)
+            h.setContentsMargins(0, 0, 12, 0)
+            h.setSpacing(4)
+            swatch = QLabel()
+            swatch.setFixedSize(12, 12)
+            swatch.setStyleSheet(
+                f"background-color: {color_hex}; border: 1px solid #888888; border-radius: 2px;"
+            )
+            h.addWidget(swatch)
+            h.addWidget(QLabel(str(name)))
+            layout.addWidget(group)
+        layout.addStretch(1)
 
     def _on_jump_enter(self) -> None:
         text = self.jump_input.text().strip()
