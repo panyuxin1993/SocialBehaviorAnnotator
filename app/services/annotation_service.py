@@ -155,11 +155,87 @@ class AnnotationService:
         if self.annotations.empty or "start_time" not in self.annotations.columns:
             return []
         starts: list[int] = []
-        for value in self.annotations["start_time"].dropna().astype(str).tolist():
-            frame = self._frame_from_start_time(value, video_timestamps, max_frame_index=max_frame_index)
+        for _, row in self.annotations.iterrows():
+            frame = self._frame_from_row(row, video_timestamps, max_frame_index=max_frame_index)
             if frame is not None:
                 starts.append(frame)
         return sorted(set(starts))
+
+    def next_event_from_current_time(
+        self,
+        current_frame: int,
+        video_timestamps: list[float] | None = None,
+        max_frame_index: int | None = None,
+    ) -> tuple[int | None, dict | None]:
+        """Jump target: event with the smallest start time strictly after the current frame's time."""
+        cur_u = self._unix_at_frame(current_frame, video_timestamps, max_frame_index)
+        if cur_u is None:
+            return None, None
+        # Primary rule: choose the nearest event that maps to a strictly later frame.
+        # This avoids re-selecting the same event when the current frame timestamp is
+        # slightly earlier than that event's parsed start_time.
+        best_u: float | None = None
+        best_frame: int | None = None
+        best_row: pd.Series | None = None
+        for _, row in self.annotations.iterrows():
+            eu = self._row_start_unix(row)
+            if eu is None:
+                continue
+            if eu <= cur_u:
+                continue
+            frame = self._frame_from_row(row, video_timestamps, max_frame_index=max_frame_index)
+            if frame is None:
+                continue
+            if frame <= int(current_frame):
+                continue
+            if best_u is None or eu < best_u:
+                best_u = eu
+                best_frame = int(frame)
+                best_row = row
+        if best_row is None:
+            # Fallback: keep prior strict-time behavior if no later-frame candidate exists.
+            # This preserves behavior for unusual timestamp/frame mappings.
+            for _, row in self.annotations.iterrows():
+                eu = self._row_start_unix(row)
+                if eu is None or eu <= cur_u:
+                    continue
+                frame = self._frame_from_row(row, video_timestamps, max_frame_index=max_frame_index)
+                if frame is None:
+                    continue
+                if best_u is None or eu < best_u:
+                    best_u = eu
+                    best_frame = int(frame)
+                    best_row = row
+        if best_row is None or best_frame is None:
+            return None, None
+        return best_frame, best_row.to_dict()
+
+    def previous_event_from_current_time(
+        self,
+        current_frame: int,
+        video_timestamps: list[float] | None = None,
+        max_frame_index: int | None = None,
+    ) -> tuple[int | None, dict | None]:
+        """Jump target: event with the largest start time strictly before the current frame's time."""
+        cur_u = self._unix_at_frame(current_frame, video_timestamps, max_frame_index)
+        if cur_u is None:
+            return None, None
+        best_u: float | None = None
+        best_row: pd.Series | None = None
+        for _, row in self.annotations.iterrows():
+            eu = self._row_start_unix(row)
+            if eu is None:
+                continue
+            if eu < cur_u:
+                if best_u is None or eu > best_u:
+                    best_u = eu
+                    best_row = row
+        if best_row is None:
+            return None, None
+        frame = self._frame_from_row(best_row, video_timestamps, max_frame_index=max_frame_index)
+        if frame is None:
+            return None, None
+        return int(frame), best_row.to_dict()
 
     def next_event_start_frame(
         self,
@@ -167,11 +243,10 @@ class AnnotationService:
         video_timestamps: list[float] | None = None,
         max_frame_index: int | None = None,
     ) -> int | None:
-        starts = self.start_frames(video_timestamps, max_frame_index=max_frame_index)
-        for frame in starts:
-            if frame > current_frame:
-                return frame
-        return None
+        f, _ = self.next_event_from_current_time(
+            current_frame, video_timestamps, max_frame_index=max_frame_index
+        )
+        return f
 
     def previous_event_start_frame(
         self,
@@ -179,9 +254,10 @@ class AnnotationService:
         video_timestamps: list[float] | None = None,
         max_frame_index: int | None = None,
     ) -> int | None:
-        starts = self.start_frames(video_timestamps, max_frame_index=max_frame_index)
-        prev = [frame for frame in starts if frame < current_frame]
-        return prev[-1] if prev else None
+        f, _ = self.previous_event_from_current_time(
+            current_frame, video_timestamps, max_frame_index=max_frame_index
+        )
+        return f
 
     def find_event_by_start_frame(
         self,
@@ -193,16 +269,83 @@ class AnnotationService:
             return None
         matched_row = None
         for _, row in self.annotations.iterrows():
-            value = row.get("start_time", None)
-            if value is None:
-                continue
-            frame = self._frame_from_start_time(str(value), video_timestamps, max_frame_index=max_frame_index)
+            frame = self._frame_from_row(row, video_timestamps, max_frame_index=max_frame_index)
             if frame == int(start_frame):
                 matched_row = row
                 break
         if matched_row is None:
             return None
         return matched_row.to_dict()
+
+    @staticmethod
+    def _unix_at_frame(
+        current_frame: int,
+        video_timestamps: list[float] | None,
+        max_frame_index: int | None,
+    ) -> float | None:
+        if not video_timestamps:
+            return None
+        cap = len(video_timestamps) - 1
+        if max_frame_index is not None and max_frame_index >= 0:
+            cap = min(cap, max_frame_index)
+        fi = max(0, min(int(current_frame), cap))
+        return float(video_timestamps[fi])
+
+    def _row_start_unix(self, row: pd.Series) -> float | None:
+        """Parse this row's event start to Unix seconds (``date`` + ``start_time`` when split)."""
+        st = row.get("start_time")
+        if st is None:
+            return None
+        try:
+            if isinstance(st, float) and pd.isna(st):
+                return None
+        except (TypeError, ValueError):
+            return None
+        st_s = str(st).strip()
+        if not st_s or st_s.lower() == "nan":
+            return None
+        date_v = row.get("date")
+        try:
+            if date_v is not None and not (isinstance(date_v, float) and pd.isna(date_v)):
+                ds = str(date_v).strip()
+                if ds and ds.lower() != "nan":
+                    u = annotation_datetime_to_unix(ds, st_s)
+                    if u is not None:
+                        return float(u)
+        except Exception:
+            pass
+        u = annotation_datetime_to_unix(st_s)
+        return float(u) if u is not None else None
+
+    def _frame_from_row(
+        self,
+        row: pd.Series,
+        video_timestamps: list[float] | None = None,
+        max_frame_index: int | None = None,
+    ) -> int | None:
+        u = self._row_start_unix(row)
+        if u is None:
+            return None
+        return self._frame_index_from_unix(u, video_timestamps, max_frame_index=max_frame_index)
+
+    @staticmethod
+    def _frame_index_from_unix(
+        unix_value: float,
+        video_timestamps: list[float] | None = None,
+        max_frame_index: int | None = None,
+    ) -> int | None:
+        if not video_timestamps:
+            return None
+        n = len(video_timestamps)
+        if max_frame_index is not None and max_frame_index >= 0:
+            n = min(n, max_frame_index + 1)
+        if n <= 0:
+            return None
+        closest_idx = min(
+            range(n),
+            key=lambda idx: abs(float(video_timestamps[idx]) - unix_value),
+        )
+        return int(closest_idx)
 
     @staticmethod
     def _to_ny_datetime(value: datetime, ny_tz: ZoneInfo) -> datetime:
@@ -232,18 +375,9 @@ class AnnotationService:
             unix_value = annotation_datetime_to_unix(str(value).strip())
             if unix_value is None:
                 return None
-            if not video_timestamps:
-                return None
-            n = len(video_timestamps)
-            if max_frame_index is not None and max_frame_index >= 0:
-                n = min(n, max_frame_index + 1)
-            if n <= 0:
-                return None
-            closest_idx = min(
-                range(n),
-                key=lambda idx: abs(float(video_timestamps[idx]) - unix_value),
+            return AnnotationService._frame_index_from_unix(
+                float(unix_value), video_timestamps, max_frame_index=max_frame_index
             )
-            return int(closest_idx)
         except Exception:
             return None
 

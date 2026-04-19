@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFrame,
@@ -34,11 +34,36 @@ class NavigatorPanel(QWidget):
 
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setRange(0, 0)
-        self.slider.valueChanged.connect(self.seek_to_frame.emit)
+        self.slider.sliderPressed.connect(self.pause_playback)
+        self.slider.valueChanged.connect(self._on_slider_value_changed)
 
         self.jump_input = QLineEdit()
         self.jump_input.setPlaceholderText("Frame index or datetime (YYYY-MM-DD HH:MM:SS)")
         self.jump_input.returnPressed.connect(self._on_jump_enter)
+
+        self.play_btn = QPushButton("Play")
+        self.pause_btn = QPushButton("Pause")
+        self.pause_btn.setEnabled(False)
+        self.play_btn.clicked.connect(self.start_playback)
+        self.pause_btn.clicked.connect(self.pause_playback)
+
+        self.playback_speed_spin = QDoubleSpinBox()
+        self.playback_speed_spin.setRange(0.05, 64.0)
+        self.playback_speed_spin.setDecimals(2)
+        self.playback_speed_spin.setSingleStep(0.25)
+        self.playback_speed_spin.setValue(1.0)
+        self.playback_speed_spin.setFixedWidth(88)
+        self.playback_speed_spin.setToolTip(
+            "Playback speed as a multiple of real time (uses video FPS). "
+            "Shortcuts: Space play/pause, ← → one frame."
+        )
+        self.playback_speed_spin.valueChanged.connect(self._on_playback_speed_changed)
+
+        self._playback_fps: float = 30.0
+        self._playing = False
+        self._current_frame_idx: int = 0
+        self._play_timer = QTimer(self)
+        self._play_timer.timeout.connect(self._advance_play_frame)
 
         self.previous_btn = QPushButton("Previous event")
         self.next_btn = QPushButton("Next event")
@@ -48,6 +73,10 @@ class NavigatorPanel(QWidget):
         self.status_label = QLabel("frame: - / -")
 
         top_row.addWidget(QLabel("Navigator"))
+        top_row.addWidget(self.play_btn)
+        top_row.addWidget(self.pause_btn)
+        top_row.addWidget(QLabel("× speed"))
+        top_row.addWidget(self.playback_speed_spin)
         top_row.addWidget(self.slider, stretch=2)
         top_row.addWidget(self.jump_input, stretch=1)
         top_row.addWidget(self.previous_btn)
@@ -89,6 +118,58 @@ class NavigatorPanel(QWidget):
         layout.addLayout(etho_row)
         layout.addWidget(self.ethogram)
 
+    def _on_slider_value_changed(self, value: int) -> None:
+        self.seek_to_frame.emit(int(value))
+
+    def set_playback_fps(self, fps: float) -> None:
+        """Video frame rate for play timing (call after loading a clip)."""
+        self._playback_fps = float(fps) if fps and fps > 0 else 30.0
+        self._update_play_timer_interval()
+
+    def _on_playback_speed_changed(self, _value: float) -> None:
+        self._update_play_timer_interval()
+
+    def _update_play_timer_interval(self) -> None:
+        fps = max(self._playback_fps, 0.001)
+        speed = max(float(self.playback_speed_spin.value()), 0.01)
+        ms = int(round(1000.0 / (fps * speed)))
+        ms = max(1, min(ms, 2000))
+        self._play_timer.setInterval(ms)
+
+    def start_playback(self) -> None:
+        last = max(0, self.total_frames - 1)
+        if last <= 0:
+            return
+        if self._current_frame_idx >= last:
+            return
+        self._playing = True
+        self._update_play_timer_interval()
+        self._play_timer.start()
+        self.play_btn.setEnabled(False)
+        self.pause_btn.setEnabled(True)
+
+    def pause_playback(self) -> None:
+        self._playing = False
+        self._play_timer.stop()
+        self.play_btn.setEnabled(True)
+        self.pause_btn.setEnabled(False)
+
+    def toggle_play_pause(self) -> None:
+        if self._playing:
+            self.pause_playback()
+        else:
+            self.start_playback()
+
+    def _advance_play_frame(self) -> None:
+        if not self._playing:
+            return
+        last = max(0, self.total_frames - 1)
+        nxt = min(self._current_frame_idx + 1, last)
+        if nxt <= self._current_frame_idx:
+            self.pause_playback()
+            return
+        self.seek_to_frame.emit(nxt)
+
     def _populate_ethogram_legend(self, items: object) -> None:
         layout = self._legend_inner
         while layout.count():
@@ -113,6 +194,7 @@ class NavigatorPanel(QWidget):
         layout.addStretch(1)
 
     def _on_jump_enter(self) -> None:
+        self.pause_playback()
         text = self.jump_input.text().strip()
         if not text:
             return
@@ -128,9 +210,10 @@ class NavigatorPanel(QWidget):
 
     def set_current_frame(self, frame_index: int, total_frames: int) -> None:
         self.total_frames = max(1, total_frames)
+        self._current_frame_idx = max(0, min(int(frame_index), self.total_frames - 1))
         self.slider.blockSignals(True)
         self.slider.setRange(0, max(0, self.total_frames - 1))
-        self.slider.setValue(max(0, min(frame_index, self.total_frames - 1)))
+        self.slider.setValue(self._current_frame_idx)
         self.slider.blockSignals(False)
-        self.status_label.setText(f"frame: {frame_index} / {self.total_frames - 1}")
+        self.status_label.setText(f"frame: {self._current_frame_idx} / {self.total_frames - 1}")
 

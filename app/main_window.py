@@ -2,12 +2,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtGui import QCloseEvent, QKeyEvent
 from PySide6.QtWidgets import (
     QDialog,
     QInputDialog,
+    QApplication,
+    QAbstractButton,
+    QAbstractItemView,
+    QAbstractSpinBox,
+    QComboBox,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
+    QTextEdit,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -43,6 +52,40 @@ class MainWindow(QMainWindow):
         self._init_layout()
         self._connect_signals()
         self._init_menu()
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        super().closeEvent(event)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
+        if event.type() != QEvent.Type.KeyPress:
+            return False
+        if not isinstance(watched, QWidget):
+            return False
+        if not self.isAncestorOf(watched):
+            return False
+        if self._navigation_shortcuts_blocked():
+            return False
+        ke = event
+        if not isinstance(ke, QKeyEvent):
+            return False
+        if ke.key() == Qt.Key_Space:
+            if isinstance(watched, QAbstractButton):
+                return False
+            self.navigator_panel.toggle_play_pause()
+            return True
+        if ke.key() == Qt.Key_Left:
+            self._step_frame_from_keyboard(-1)
+            return True
+        if ke.key() == Qt.Key_Right:
+            self._step_frame_from_keyboard(1)
+            return True
+        return False
 
     def _init_layout(self) -> None:
         central = QWidget()
@@ -149,6 +192,8 @@ class MainWindow(QMainWindow):
                 type_colors=self.control_panel.event_type_color_map(),
                 type_legend_labels=self.control_panel.event_type_legend_label_map(),
             )
+            self.navigator_panel.set_playback_fps(self.video_service.fps)
+            self.navigator_panel.pause_playback()
             self._seek_to_frame(0)
             self.statusBar().showMessage("Project loaded.", 4000)
             self.control_panel.append_log(f"Project loaded: video={video_path}")
@@ -158,10 +203,32 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Failed to load project", str(exc))
             self.control_panel.append_log(f"ERROR: load failed — {exc}")
 
+    @staticmethod
+    def _navigation_shortcuts_blocked() -> bool:
+        w = QApplication.focusWidget()
+        while w is not None:
+            if isinstance(
+                w,
+                (QLineEdit, QPlainTextEdit, QTextEdit, QAbstractSpinBox, QAbstractItemView, QComboBox),
+            ):
+                return True
+            w = w.parentWidget()
+        return False
+
+    def _step_frame_from_keyboard(self, delta: int) -> None:
+        self.navigator_panel.pause_playback()
+        tf = max(1, self.video_service.total_frames)
+        last = tf - 1
+        cur = self.video_service.current_frame_index
+        nxt = max(0, min(cur + delta, last))
+        if nxt != cur:
+            self._seek_to_frame(nxt)
+
     def _seek_to_frame(self, frame_index: int) -> None:
         try:
             frame = self.video_service.get_frame(frame_index)
         except Exception as exc:
+            self.navigator_panel.pause_playback()
             QMessageBox.warning(self, "Seek error", str(exc))
             self.control_panel.append_log(f"Seek error (frame {frame_index}): {exc}")
             return
@@ -197,35 +264,29 @@ class MainWindow(QMainWindow):
 
     def _jump_to_next_event(self) -> None:
         max_idx = self._max_video_frame_index()
-        frame_index = self.annotation_service.next_event_start_frame(
+        if max_idx is None:
+            return
+        frame_index, event = self.annotation_service.next_event_from_current_time(
             self.video_service.current_frame_index,
             self.timestamp_service.timestamps,
             max_frame_index=max_idx,
         )
         if frame_index is not None:
             self._seek_to_frame(frame_index)
-            event = self.annotation_service.find_event_by_start_frame(
-                frame_index,
-                self.timestamp_service.timestamps,
-                max_frame_index=max_idx,
-            )
             if event is not None:
                 self.control_panel.populate_from_event(event)
 
     def _jump_to_previous_event(self) -> None:
         max_idx = self._max_video_frame_index()
-        frame_index = self.annotation_service.previous_event_start_frame(
+        if max_idx is None:
+            return
+        frame_index, event = self.annotation_service.previous_event_from_current_time(
             self.video_service.current_frame_index,
             self.timestamp_service.timestamps,
             max_frame_index=max_idx,
         )
         if frame_index is not None:
             self._seek_to_frame(frame_index)
-            event = self.annotation_service.find_event_by_start_frame(
-                frame_index,
-                self.timestamp_service.timestamps,
-                max_frame_index=max_idx,
-            )
             if event is not None:
                 self.control_panel.populate_from_event(event)
 
