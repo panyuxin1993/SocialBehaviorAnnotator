@@ -21,6 +21,7 @@ ANNOTATION_COLUMNS = [
     "end_frame",
     "type",
     "location",
+    "animal_location",
     *ROLE_COLUMNS,
     "other_notes",
 ]

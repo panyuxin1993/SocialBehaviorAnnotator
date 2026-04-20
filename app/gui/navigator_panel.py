@@ -42,11 +42,8 @@ class NavigatorPanel(QWidget):
         self.jump_input.setPlaceholderText("Frame index or datetime (YYYY-MM-DD HH:MM:SS)")
         self.jump_input.returnPressed.connect(self._on_jump_enter)
 
-        self.play_btn = QPushButton("Play")
-        self.pause_btn = QPushButton("Pause")
-        self.pause_btn.setEnabled(False)
-        self.play_btn.clicked.connect(self.start_playback)
-        self.pause_btn.clicked.connect(self.pause_playback)
+        self.play_pause_btn = QPushButton("Play")
+        self.play_pause_btn.clicked.connect(self.toggle_play_pause)
 
         self.playback_speed_spin = QDoubleSpinBox()
         self.playback_speed_spin.setRange(0.05, 64.0)
@@ -77,8 +74,7 @@ class NavigatorPanel(QWidget):
         self.status_label = QLabel("frame: - / -")
 
         top_row.addWidget(QLabel("Navigator"))
-        top_row.addWidget(self.play_btn)
-        top_row.addWidget(self.pause_btn)
+        top_row.addWidget(self.play_pause_btn)
         top_row.addWidget(QLabel("× speed"))
         top_row.addWidget(self.playback_speed_spin)
         top_row.addWidget(self.slider, stretch=2)
@@ -183,15 +179,13 @@ class NavigatorPanel(QWidget):
         self._update_play_timer_interval()
         self._reset_actual_fps_tracking()
         self._play_timer.start()
-        self.play_btn.setEnabled(False)
-        self.pause_btn.setEnabled(True)
+        self.play_pause_btn.setText("Pause")
         self._refresh_playback_status()
 
     def pause_playback(self) -> None:
         self._playing = False
         self._play_timer.stop()
-        self.play_btn.setEnabled(True)
-        self.pause_btn.setEnabled(False)
+        self.play_pause_btn.setText("Play")
         self._refresh_playback_status()
 
     def toggle_play_pause(self) -> None:

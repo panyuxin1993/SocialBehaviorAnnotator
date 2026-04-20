@@ -32,6 +32,10 @@ class EventRecord:
     end_datetime: Optional[datetime]
     start_unix: float
     end_unix: Optional[float]
+    #: Arena / site: ``left``, ``right``, or ``door`` (stored in ``location`` column).
+    event_location: str = "left"
     notes: str = ""
     animals: list[AnimalRoleSelection] = field(default_factory=list)
+    #: When set, ``submit`` updates this dataframe row (positional index) instead of appending.
+    editing_iloc: Optional[int] = None
 

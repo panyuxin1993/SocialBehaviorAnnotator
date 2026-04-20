@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
+from math import isnan
 from typing import Dict, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import numpy as np
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QComboBox,
     QFormLayout,
     QGridLayout,
@@ -31,6 +35,7 @@ from PySide6.QtWidgets import (
 from app.models.event import AnimalRoleSelection, EventRecord
 from app.models.schema import ROLE_COLUMNS
 from app.gui.ethogram_widget import fallback_event_type_hex, parse_event_color_hex
+from app.services.annotation_service import annotation_datetime_to_unix
 
 
 ROLE_TO_COLUMN = {role: idx for idx, role in enumerate(ROLE_COLUMNS)}
@@ -64,6 +69,8 @@ class ControlPanel(QWidget):
         self.end_unix: Optional[float] = None
         #: Rows ``(abbr, type, #RRGGBB)`` aligned with ``event_type_combo`` items (in order).
         self._event_type_specs: list[tuple[str, str, str]] = []
+        self._editing_iloc: Optional[int] = None
+        self._loaded_event_id: str = ""
         self._build_ui()
         self._sync_event_type_specs_from_combo()
 
@@ -83,8 +90,8 @@ class ControlPanel(QWidget):
         content_layout = QVBoxLayout(container)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(8)
+        content_layout.addWidget(self._build_mode_group())
         content_layout.addWidget(self._build_timing_group())
-        content_layout.addWidget(self._build_event_group())
         content_layout.addWidget(self._build_role_table_group())
         content_layout.addWidget(self._build_notes_group())
         content_layout.addWidget(self._build_submit_row())
@@ -109,9 +116,39 @@ class ControlPanel(QWidget):
         g.addLayout(row)
         return group
 
+    def _build_mode_group(self) -> QGroupBox:
+        group = QGroupBox("Event mode")
+        row = QHBoxLayout(group)
+        self._mode_button_group = QButtonGroup(self)
+        self.btn_mode_create = QPushButton("Create new event")
+        self.btn_mode_modify = QPushButton("Modify current event")
+        self.btn_mode_create.setCheckable(True)
+        self.btn_mode_modify.setCheckable(True)
+        self._mode_button_group.addButton(self.btn_mode_create)
+        self._mode_button_group.addButton(self.btn_mode_modify)
+        self.btn_mode_create.setChecked(True)
+        self.btn_mode_create.toggled.connect(self._on_mode_create_toggled)
+        row.addWidget(self.btn_mode_create)
+        row.addWidget(self.btn_mode_modify)
+        row.addStretch(1)
+        return group
+
+    def _on_mode_create_toggled(self, checked: bool) -> None:
+        if checked:
+            self._editing_iloc = None
+            self._loaded_event_id = ""
+            self._reset_for_next_event()
+
     def _build_timing_group(self) -> QGroupBox:
-        group = QGroupBox("Event timing")
+        group = QGroupBox("Event Info")
         layout = QFormLayout(group)
+
+        self.event_type_combo = QComboBox()
+        self.event_type_combo.setEditable(True)
+        self.event_type_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.event_type_combo.view().setMinimumWidth(280)
+        self.event_type_combo.addItems(["fight", "chase", "push", "defend", "rob"])
+        layout.addRow("Event type", self.event_type_combo)
 
         self.start_time_edit = QLineEdit()
         self.end_time_edit = QLineEdit()
@@ -123,17 +160,15 @@ class ControlPanel(QWidget):
 
         layout.addRow(self.btn_set_start, self.start_time_edit)
         layout.addRow(self.btn_set_end, self.end_time_edit)
-        return group
 
-    def _build_event_group(self) -> QGroupBox:
-        group = QGroupBox("Event")
-        form = QFormLayout(group)
-        self.event_type_combo = QComboBox()
-        self.event_type_combo.setEditable(True)
-        self.event_type_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
-        self.event_type_combo.view().setMinimumWidth(280)
-        self.event_type_combo.addItems(["fight", "chase", "push", "defend", "rob"])
-        form.addRow("Event type", self.event_type_combo)
+        self.event_location_combo = QComboBox()
+        self.event_location_combo.addItems(["left", "right", "door"])
+        self.event_location_combo.setToolTip(
+            "Arena / site for this event (saved in the annotation table ``location`` column). "
+            "Role click coordinates are saved in ``animal_location``."
+        )
+        layout.addRow("Event location", self.event_location_combo)
+
         return group
 
     def _sync_event_type_specs_from_combo(self) -> None:
@@ -265,7 +300,7 @@ class ControlPanel(QWidget):
     def _build_submit_row(self) -> QWidget:
         row = QWidget()
         layout = QGridLayout(row)
-        self.submit_button = QPushButton("Submit new event")
+        self.submit_button = QPushButton("Submit event")
         layout.addWidget(self.submit_button, 0, 0)
         return row
 
@@ -409,13 +444,19 @@ class ControlPanel(QWidget):
         self.end_time_edit.setText(f"{self._current_dt} ({self._current_unix:.6f}) frame={self.end_frame}")
 
     def _submit_event(self) -> None:
+        if self.btn_mode_modify.isChecked() and self._editing_iloc is None:
+            QMessageBox.warning(
+                self,
+                "No event loaded",
+                "Jump to an event in the navigator first, or choose Create new event.",
+            )
+            return
         try:
             event = self.build_event()
         except ValueError as exc:
             QMessageBox.warning(self, "Validation", str(exc))
             return
         self.submit_event_requested.emit(event)
-        self._reset_for_next_event()
 
     def build_event(self) -> EventRecord:
         if self.start_frame is None or self.start_datetime is None or self.start_unix is None:
@@ -425,6 +466,9 @@ class ControlPanel(QWidget):
         if not display_type:
             raise ValueError("Event type is required.")
         event_type = self.stored_type_for_submit(display_type)
+
+        editing_iloc = self._editing_iloc if self.btn_mode_modify.isChecked() else None
+        event_id = (self._loaded_event_id or "").strip() if editing_iloc is not None else ""
 
         animals: list[AnimalRoleSelection] = []
         initiator_count = 0
@@ -443,7 +487,7 @@ class ControlPanel(QWidget):
             raise ValueError("At least one initiator must be selected.")
 
         return EventRecord(
-            event_id="",
+            event_id=event_id,
             event_type=event_type,
             start_frame=self.start_frame,
             end_frame=self.end_frame,
@@ -451,11 +495,19 @@ class ControlPanel(QWidget):
             end_datetime=self.end_datetime,
             start_unix=self.start_unix,
             end_unix=self.end_unix,
+            event_location=self.event_location_combo.currentText().strip() or "left",
             notes=self.notes_edit.toPlainText().strip(),
             animals=animals,
+            editing_iloc=editing_iloc,
         )
 
+    def reset_new_event_form(self) -> None:
+        """Clear fields after a new event is saved (keeps Create mode selected)."""
+        self._reset_for_next_event()
+
     def _reset_for_next_event(self) -> None:
+        self._editing_iloc = None
+        self._loaded_event_id = ""
         self.start_frame = None
         self.end_frame = None
         self.start_datetime = None
@@ -465,6 +517,7 @@ class ControlPanel(QWidget):
         self.start_time_edit.clear()
         self.end_time_edit.clear()
         self.notes_edit.clear()
+        self.event_location_combo.setCurrentIndex(0)
         self.roles_table.blockSignals(True)
         for row in range(self.roles_table.rowCount()):
             for role in ROLE_COLUMNS:
@@ -473,7 +526,163 @@ class ControlPanel(QWidget):
                 item.setData(Qt.UserRole, None)
         self.roles_table.blockSignals(False)
 
-    def populate_from_event(self, event: dict) -> None:
+    @staticmethod
+    def _event_field_str(event: dict, key: str) -> str:
+        v = event.get(key)
+        if v is None:
+            return ""
+        s = str(v).strip()
+        return "" if s.lower() in ("", "nan", "none") else s
+
+    def _set_event_location_combo(self, value: str) -> None:
+        v = (value or "").strip().lower()
+        for i in range(self.event_location_combo.count()):
+            if self.event_location_combo.itemText(i).strip().lower() == v:
+                self.event_location_combo.setCurrentIndex(i)
+                return
+        self.event_location_combo.setCurrentIndex(0)
+
+    @staticmethod
+    def _parse_xy_string(s: str) -> Optional[Tuple[float, float]]:
+        try:
+            parts = [p.strip() for p in str(s).split(",")]
+            if len(parts) != 2:
+                return None
+            return float(parts[0]), float(parts[1])
+        except (TypeError, ValueError):
+            return None
+
+    def _clear_role_points(self) -> None:
+        self.roles_table.blockSignals(True)
+        try:
+            for row in range(self.roles_table.rowCount()):
+                for role in ROLE_COLUMNS:
+                    item = self.roles_table.item(row, ROLE_TO_COLUMN[role])
+                    if item is not None:
+                        item.setData(Qt.UserRole, None)
+        finally:
+            self.roles_table.blockSignals(False)
+
+    def _apply_role_points_payload(self, payload: dict) -> None:
+        if not self.animal_names:
+            return
+        self.roles_table.blockSignals(True)
+        try:
+            for row, name in enumerate(self.animal_names):
+                for role in ROLE_COLUMNS:
+                    item = self.roles_table.item(row, ROLE_TO_COLUMN[role])
+                    if item is None:
+                        continue
+                    inner = payload.get(role)
+                    if not isinstance(inner, dict):
+                        continue
+                    raw = inner.get(name)
+                    if raw is None:
+                        continue
+                    pt = self._parse_xy_string(raw) if isinstance(raw, str) else None
+                    if pt is not None:
+                        item.setData(Qt.UserRole, pt)
+        finally:
+            self.roles_table.blockSignals(False)
+
+    @staticmethod
+    def _coerce_int_frame(val: object) -> Optional[int]:
+        if val is None:
+            return None
+        if isinstance(val, str):
+            s = val.strip()
+            if not s or s.lower() == "nan":
+                return None
+            try:
+                return int(float(s))
+            except ValueError:
+                return None
+        if isinstance(val, float) and isnan(val):
+            return None
+        try:
+            return int(val)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
+    def _fill_timing_from_event(self, event: dict, seek_frame: Optional[int]) -> None:
+        ny = ZoneInfo("America/New_York")
+        date_v = self._event_field_str(event, "date")
+        st_v = self._event_field_str(event, "start_time")
+        et_v = self._event_field_str(event, "end_time")
+
+        sf = self._coerce_int_frame(event.get("start_frame"))
+        self.start_frame = sf if sf is not None else seek_frame
+
+        u_s = annotation_datetime_to_unix(date_v, st_v) if date_v else annotation_datetime_to_unix(st_v)
+        if u_s is not None:
+            self.start_unix = float(u_s)
+            self.start_datetime = datetime.fromtimestamp(self.start_unix, tz=ny).replace(tzinfo=None)
+            dt_display = f"{date_v} {st_v}".strip() if date_v else st_v
+            self.start_time_edit.setText(
+                f"{dt_display} ({self.start_unix:.6f}) frame={self.start_frame}"
+            )
+        else:
+            self.start_datetime = None
+            self.start_unix = None
+            self.start_time_edit.setText(st_v)
+
+        if et_v:
+            u_e = annotation_datetime_to_unix(date_v, et_v) if date_v else annotation_datetime_to_unix(et_v)
+            if u_e is not None:
+                self.end_unix = float(u_e)
+                self.end_datetime = datetime.fromtimestamp(self.end_unix, tz=ny).replace(tzinfo=None)
+                dt_e = f"{date_v} {et_v}".strip() if date_v else et_v
+                self.end_frame = self._coerce_int_frame(event.get("end_frame"))
+                self.end_time_edit.setText(
+                    f"{dt_e} ({self.end_unix:.6f}) frame={self.end_frame}"
+                )
+            else:
+                self.end_datetime = None
+                self.end_unix = None
+                self.end_frame = self._coerce_int_frame(event.get("end_frame"))
+                self.end_time_edit.setText(et_v)
+        else:
+            self.end_datetime = None
+            self.end_unix = None
+            self.end_frame = self._coerce_int_frame(event.get("end_frame"))
+            self.end_time_edit.clear()
+
+    def _apply_role_columns_from_event(self, event: dict) -> None:
+        self.roles_table.blockSignals(True)
+        try:
+            for row in range(self.roles_table.rowCount()):
+                for role in ROLE_COLUMNS:
+                    item = self.roles_table.item(row, ROLE_TO_COLUMN[role])
+                    if item is not None:
+                        item.setCheckState(Qt.Unchecked)
+                        item.setData(Qt.UserRole, None)
+            for role in ROLE_COLUMNS:
+                raw = self._event_field_str(event, role)
+                if not raw:
+                    continue
+                for name in (x.strip() for x in raw.split(",") if x.strip()):
+                    try:
+                        r = self.animal_names.index(name)
+                    except ValueError:
+                        continue
+                    item = self.roles_table.item(r, ROLE_TO_COLUMN[role])
+                    if item is not None:
+                        item.setCheckState(Qt.Checked)
+        finally:
+            self.roles_table.blockSignals(False)
+
+    def populate_from_event(
+        self, event: dict, iloc: Optional[int] = None, seek_frame: Optional[int] = None
+    ) -> None:
+        self.btn_mode_modify.blockSignals(True)
+        self.btn_mode_modify.setChecked(True)
+        self.btn_mode_modify.blockSignals(False)
+
+        self._editing_iloc = iloc
+        self._loaded_event_id = self._event_field_str(event, "event_id")
+
+        self._fill_timing_from_event(event, seek_frame)
+
         event_type = str(event.get("type", "")).strip()
         if event_type:
             combo_label = self.display_type_for_combo(event_type)
@@ -484,4 +693,35 @@ class ControlPanel(QWidget):
                 idx = self._event_type_combo_index(combo_label)
             self.event_type_combo.setCurrentIndex(idx)
         self.notes_edit.setText(str(event.get("other_notes", "")))
+
+        self._apply_role_columns_from_event(event)
+
+        loc_raw = self._event_field_str(event, "location")
+        animal_raw = self._event_field_str(event, "animal_location")
+        payload: dict | None = None
+
+        if animal_raw:
+            try:
+                p = json.loads(animal_raw)
+                if isinstance(p, dict) and p:
+                    payload = p
+            except json.JSONDecodeError:
+                pass
+
+        if payload is None and loc_raw:
+            try:
+                p = json.loads(loc_raw)
+                if isinstance(p, dict) and p and all(isinstance(v, dict) for v in p.values()):
+                    payload = p
+                    loc_raw = ""
+            except json.JSONDecodeError:
+                pass
+
+        if loc_raw:
+            self._set_event_location_combo(loc_raw)
+        else:
+            self.event_location_combo.setCurrentIndex(0)
+
+        if payload is not None:
+            self._apply_role_points_payload(payload)
 

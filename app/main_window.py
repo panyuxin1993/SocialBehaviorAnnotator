@@ -267,34 +267,44 @@ class MainWindow(QMainWindow):
         max_idx = self._max_video_frame_index()
         if max_idx is None:
             return
-        frame_index, event = self.annotation_service.next_event_from_current_time(
+        frame_index, event, iloc = self.annotation_service.next_event_from_current_time(
             self.video_service.current_frame_index,
             self.timestamp_service.timestamps,
             max_frame_index=max_idx,
         )
         if frame_index is not None:
             self._seek_to_frame(frame_index)
-            if event is not None:
-                self.control_panel.populate_from_event(event)
+            if event is not None and iloc is not None:
+                self.control_panel.populate_from_event(event, iloc=iloc, seek_frame=frame_index)
 
     def _jump_to_previous_event(self) -> None:
         max_idx = self._max_video_frame_index()
         if max_idx is None:
             return
-        frame_index, event = self.annotation_service.previous_event_from_current_time(
+        frame_index, event, iloc = self.annotation_service.previous_event_from_current_time(
             self.video_service.current_frame_index,
             self.timestamp_service.timestamps,
             max_frame_index=max_idx,
         )
         if frame_index is not None:
             self._seek_to_frame(frame_index)
-            if event is not None:
-                self.control_panel.populate_from_event(event)
+            if event is not None and iloc is not None:
+                self.control_panel.populate_from_event(event, iloc=iloc, seek_frame=frame_index)
 
     def _on_submit_event(self, event) -> None:
-        event.event_id = self.annotation_service.generate_event_id()
-        self.annotation_service.append_event(event)
-        self._save_annotations()
+        try:
+            if event.editing_iloc is not None:
+                self.annotation_service.update_event_at_iloc(event.editing_iloc, event)
+            else:
+                if not (event.event_id or "").strip():
+                    event.event_id = self.annotation_service.generate_event_id()
+                self.annotation_service.append_event(event)
+            self._save_annotations()
+        except Exception as exc:
+            QMessageBox.critical(self, "Save failed", str(exc))
+            self.control_panel.append_log(f"ERROR: event save failed — {exc}")
+            return
+
         self.navigator_panel.ethogram.set_data(
             self.annotation_service.annotations,
             self.video_service.current_frame_index,
@@ -305,8 +315,17 @@ class MainWindow(QMainWindow):
             type_colors=self.control_panel.event_type_color_map(),
             type_legend_labels=self.control_panel.event_type_legend_label_map(),
         )
-        QMessageBox.information(self, "Saved", f"Event {event.event_id} saved.")
-        self.control_panel.append_log(f"Saved event {event.event_id} ({event.event_type})")
+        if event.editing_iloc is not None:
+            iloc = event.editing_iloc
+            row_dict = self.annotation_service.annotations.iloc[iloc].to_dict()
+            eid = str(row_dict.get("event_id", "")).strip()
+            self.control_panel.populate_from_event(row_dict, iloc=iloc, seek_frame=None)
+            QMessageBox.information(self, "Saved", f"Event {eid} updated.")
+            self.control_panel.append_log(f"Updated event {eid} ({event.event_type})")
+        else:
+            QMessageBox.information(self, "Saved", f"Event {event.event_id} saved.")
+            self.control_panel.append_log(f"Saved event {event.event_id} ({event.event_type})")
+            self.control_panel.reset_new_event_form()
 
     def _save_annotations(self) -> None:
         try:
