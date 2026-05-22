@@ -1,0 +1,20 @@
+abbr,type,color
+F,fight,#d32f2f
+CO,confrontation,#e65100
+C,chase,#e65100
+R,rob food,#0288d1
+FM,food_move,#f0f0f0
+I,introduce,#aa54d8
+UD,unlock_door,#d6d854
+FD,food_delivery,#54c4d8
+P,playful fight/peaceful fight,#d85d54
+RW,Rob wood block,#0288d1
+S,share,#800080
+H,"harvest food, especially for foraging, rather than rob from others",#54d89a
+SN,"sniff, usually is genital sniffing",#d85b54
+EC,"encounter, come upon face-to-face, unexpectedly",#101010
+HD,huddle,#d8cd54
+G,allogrooming,#d854cb
+PO,policing,#5475d8
+D,defense,#ffb300
+PS,push,#ff6f00

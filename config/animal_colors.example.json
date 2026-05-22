@@ -1,0 +1,13 @@
+{
+  "description": "Optional palette for animal name row backgrounds in the role table (hex colors, top to bottom).",
+  "colors": [
+    "#F8BBD0",
+    "#BBDEFB",
+    "#C8E6C9",
+    "#FFECB3",
+    "#D1C4E9",
+    "#B2EBF2",
+    "#FFE0B2",
+    "#DCEDC8"
+  ]
+}
