@@ -79,11 +79,13 @@ class MainWindow(QMainWindow):
                 return False
             self.navigator_panel.toggle_play_pause()
             return True
+        if ke.modifiers() != Qt.KeyboardModifier.NoModifier:
+            return False
         if ke.key() == Qt.Key_Left:
-            self._step_frame_from_keyboard(-1)
+            self.navigator_panel.step_frame(-1)
             return True
         if ke.key() == Qt.Key_Right:
-            self._step_frame_from_keyboard(1)
+            self.navigator_panel.step_frame(1)
             return True
         return False
 
@@ -214,15 +216,6 @@ class MainWindow(QMainWindow):
                 return True
             w = w.parentWidget()
         return False
-
-    def _step_frame_from_keyboard(self, delta: int) -> None:
-        self.navigator_panel.pause_playback()
-        tf = max(1, self.video_service.total_frames)
-        last = tf - 1
-        cur = self.video_service.current_frame_index
-        nxt = max(0, min(cur + delta, last))
-        if nxt != cur:
-            self._seek_to_frame(nxt)
 
     def _seek_to_frame(self, frame_index: int) -> None:
         try:

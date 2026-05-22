@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from math import isnan
 from typing import Dict, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -585,33 +584,13 @@ class ControlPanel(QWidget):
         finally:
             self.roles_table.blockSignals(False)
 
-    @staticmethod
-    def _coerce_int_frame(val: object) -> Optional[int]:
-        if val is None:
-            return None
-        if isinstance(val, str):
-            s = val.strip()
-            if not s or s.lower() == "nan":
-                return None
-            try:
-                return int(float(s))
-            except ValueError:
-                return None
-        if isinstance(val, float) and isnan(val):
-            return None
-        try:
-            return int(val)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return None
-
     def _fill_timing_from_event(self, event: dict, seek_frame: Optional[int]) -> None:
         ny = ZoneInfo("America/New_York")
         date_v = self._event_field_str(event, "date")
         st_v = self._event_field_str(event, "start_time")
         et_v = self._event_field_str(event, "end_time")
 
-        sf = self._coerce_int_frame(event.get("start_frame"))
-        self.start_frame = sf if sf is not None else seek_frame
+        self.start_frame = seek_frame
 
         u_s = annotation_datetime_to_unix(date_v, st_v) if date_v else annotation_datetime_to_unix(st_v)
         if u_s is not None:
@@ -632,19 +611,17 @@ class ControlPanel(QWidget):
                 self.end_unix = float(u_e)
                 self.end_datetime = datetime.fromtimestamp(self.end_unix, tz=ny).replace(tzinfo=None)
                 dt_e = f"{date_v} {et_v}".strip() if date_v else et_v
-                self.end_frame = self._coerce_int_frame(event.get("end_frame"))
-                self.end_time_edit.setText(
-                    f"{dt_e} ({self.end_unix:.6f}) frame={self.end_frame}"
-                )
+                self.end_frame = None
+                self.end_time_edit.setText(f"{dt_e} ({self.end_unix:.6f})")
             else:
                 self.end_datetime = None
                 self.end_unix = None
-                self.end_frame = self._coerce_int_frame(event.get("end_frame"))
+                self.end_frame = None
                 self.end_time_edit.setText(et_v)
         else:
             self.end_datetime = None
             self.end_unix = None
-            self.end_frame = self._coerce_int_frame(event.get("end_frame"))
+            self.end_frame = None
             self.end_time_edit.clear()
 
     def _apply_role_columns_from_event(self, event: dict) -> None:

@@ -10,78 +10,21 @@ import pandas as pd
 
 from app.models.event import EventRecord
 from app.models.schema import ROLE_COLUMNS
+from app.services.annotation_datetime import (
+    annotation_datetime_to_unix,
+    format_annotation_date,
+    format_annotation_time,
+    looks_like_full_datetime,
+)
 from app.services.table_store import TableStore
 
-_ANNOTATION_TZ = ZoneInfo("America/New_York")
-
-
-def looks_like_full_datetime(s: str) -> bool:
-    """True if string likely encodes calendar date + time (not time-only)."""
-    s = s.strip()
-    if len(s) < 10:
-        return False
-    return s[4] == "-" and s[7] == "-" and s[:4].isdigit()
-
-
-def annotation_datetime_to_unix(*parts: str | None) -> float | None:
-    """Parse annotation date/time text to Unix seconds for matching video timestamps.
-
-    - Strings with timezone or offset are interpreted accordingly.
-    - **Naive** strings are treated as **America/New_York** (lab collection timezone),
-      not UTC — so they align with ``pd.to_datetime(..., utc=True)`` on naive input,
-      which would incorrectly assume UTC.
-    - When two parts are given and the second is **time-only** (typical Excel split:
-      ``2025-12-16 00:00:00`` + ``09:00:45.7``), the calendar day is taken from the
-      first value and the clock from the second — a naive string join would not parse.
-    """
-    texts: list[str] = []
-    for p in parts:
-        if p is None:
-            continue
-        s = str(p).strip()
-        if not s or s.lower() == "nan":
-            continue
-        texts.append(s)
-    if not texts:
-        return None
-    try:
-        ts: pd.Timestamp | None = None
-        if len(texts) == 2:
-            a, b = texts[0], texts[1]
-            ta = pd.to_datetime(a, errors="coerce", utc=False)
-            tb = pd.to_datetime(b, errors="coerce", utc=False)
-            # Second cell is wall-clock only, not a calendar datetime.
-            if not looks_like_full_datetime(b) and not pd.isna(ta) and not pd.isna(tb):
-                day = ta.normalize()
-                ts = day.replace(
-                    hour=int(tb.hour),
-                    minute=int(tb.minute),
-                    second=int(tb.second),
-                    microsecond=int(tb.microsecond),
-                    nanosecond=int(getattr(tb, "nanosecond", 0) or 0),
-                )
-            else:
-                ts = pd.to_datetime(f"{a} {b}", errors="coerce", utc=False)
-        else:
-            joined = " ".join(texts)
-            ts = pd.to_datetime(joined, errors="coerce", utc=False)
-
-        if ts is None or pd.isna(ts):
-            return None
-
-        # Already has a zone (e.g. ISO with offset from this app): .timestamp() is correct.
-        if ts.tzinfo is not None:
-            return float(ts.timestamp())
-
-        # Naive wall clock = lab time in America/New_York. Avoid pandas tz_localize here:
-        # it can raise on ambiguous/nonexistent NY instants or on some pandas/ZoneInfo combos.
-        py_dt = ts.to_pydatetime()
-        if py_dt.tzinfo is not None:
-            py_dt = py_dt.replace(tzinfo=None)
-        aware = py_dt.replace(tzinfo=_ANNOTATION_TZ)
-        return float(aware.timestamp())
-    except Exception:
-        return None
+__all__ = [
+    "AnnotationService",
+    "annotation_datetime_to_unix",
+    "format_annotation_date",
+    "format_annotation_time",
+    "looks_like_full_datetime",
+]
 
 
 class AnnotationService:
@@ -133,8 +76,6 @@ class AnnotationService:
             "date": start_dt.strftime("%Y-%m-%d"),
             "start_time": start_dt.isoformat(sep=" ", timespec="milliseconds"),
             "end_time": end_dt.isoformat(sep=" ", timespec="milliseconds") if end_dt else "",
-            "start_frame": int(event.start_frame) if event.start_frame is not None else "",
-            "end_frame": int(event.end_frame) if event.end_frame is not None else "",
             "type": event.event_type,
             "location": arena,
             "animal_location": json.dumps(location_payload, ensure_ascii=True) if location_payload else "",

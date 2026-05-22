@@ -4,6 +4,7 @@ from datetime import datetime
 from time import perf_counter
 
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFrame,
@@ -53,7 +54,7 @@ class NavigatorPanel(QWidget):
         self.playback_speed_spin.setFixedWidth(88)
         self.playback_speed_spin.setToolTip(
             "Playback speed as a multiple of real time (uses video FPS). "
-            "Shortcuts: Space play/pause, ← → one frame."
+            "Shortcuts: Space play/pause; ←/→ or Ctrl+←/→ step one frame."
         )
         self.playback_speed_spin.valueChanged.connect(self._on_playback_speed_changed)
 
@@ -120,6 +121,22 @@ class NavigatorPanel(QWidget):
         layout.addLayout(top_row)
         layout.addLayout(etho_row)
         layout.addWidget(self.ethogram)
+
+        prev_frame_shortcut = QShortcut(QKeySequence(Qt.Modifier.CTRL | Qt.Key.Key_Left), self)
+        prev_frame_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        prev_frame_shortcut.activated.connect(lambda: self.step_frame(-1))
+
+        next_frame_shortcut = QShortcut(QKeySequence(Qt.Modifier.CTRL | Qt.Key.Key_Right), self)
+        next_frame_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        next_frame_shortcut.activated.connect(lambda: self.step_frame(1))
+
+    def step_frame(self, delta: int) -> None:
+        """Seek one frame backward (delta=-1) or forward (delta=1)."""
+        self.pause_playback()
+        last = max(0, self.total_frames - 1)
+        nxt = max(0, min(self._current_frame_idx + int(delta), last))
+        if nxt != self._current_frame_idx:
+            self.seek_to_frame.emit(nxt)
 
     def _on_slider_value_changed(self, value: int) -> None:
         self.seek_to_frame.emit(int(value))

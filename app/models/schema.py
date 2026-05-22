@@ -17,8 +17,6 @@ ANNOTATION_COLUMNS = [
     "date",
     "start_time",
     "end_time",
-    "start_frame",
-    "end_frame",
     "type",
     "location",
     "animal_location",

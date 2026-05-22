@@ -320,12 +320,8 @@ class EthogramWidget(QWidget):
         return out
 
     def _event_frame_span(self, row) -> tuple[int | None, int | None]:
-        start = self._to_int_or_none(row.get("start_frame", None))
-        if start is None:
-            start = self._frame_from_datetime_str(row.get("date", None), row.get("start_time", None))
-        end = self._to_int_or_none(row.get("end_frame", None))
-        if end is None:
-            end = self._frame_from_datetime_str(row.get("date", None), row.get("end_time", None))
+        start = self._frame_from_datetime_str(row.get("date", None), row.get("start_time", None))
+        end = self._frame_from_datetime_str(row.get("date", None), row.get("end_time", None))
         if end is None:
             end = start
         if start is None:
@@ -340,7 +336,7 @@ class EthogramWidget(QWidget):
             dedupe_cols = [c for c in ["start_time", "type", "other_notes"] if c in self.events.columns]
             if dedupe_cols:
                 return self.events.drop_duplicates(subset=dedupe_cols)
-        if "start_frame" in self.events.columns and "event_id" in self.events.columns:
+        if "event_id" in self.events.columns:
             return self.events.drop_duplicates(subset=["event_id"])
         return self.events
 
