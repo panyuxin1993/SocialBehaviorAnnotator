@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -33,27 +34,20 @@ from PySide6.QtWidgets import (
 
 from app.models.event import AnimalRoleSelection, EventRecord
 from app.models.schema import ROLE_COLUMNS
-from app.gui.ethogram_widget import fallback_event_type_hex, parse_event_color_hex
+from app.color_utils import fallback_event_type_hex, parse_event_color_hex
+from app.config_loader import load_event_type_specs
+from app.gui.colors import ANIMAL_COLORS
+from app.gui.kinematics_widget import KinematicsWidget
 from app.services.annotation_service import annotation_datetime_to_unix
+from app.services.tracking_service import TrackingService
 
 
 ROLE_TO_COLUMN = {role: idx for idx, role in enumerate(ROLE_COLUMNS)}
 
-ANIMAL_COLORS = [
-    "#F8BBD0",
-    "#BBDEFB",
-    "#C8E6C9",
-    "#FFECB3",
-    "#D1C4E9",
-    "#B2EBF2",
-    "#FFE0B2",
-    "#DCEDC8",
-]
-
-
 class ControlPanel(QWidget):
     request_seek_frame = Signal(int)
     submit_event_requested = Signal(EventRecord)
+    kinematics_refresh_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -70,12 +64,14 @@ class ControlPanel(QWidget):
         self._event_type_specs: list[tuple[str, str, str]] = []
         self._editing_iloc: Optional[int] = None
         self._loaded_event_id: str = ""
+        self._tracking_service: TrackingService | None = None
         self._build_ui()
-        self._sync_event_type_specs_from_combo()
+        self.set_event_type_specs(load_event_type_specs())
+        self.kinematics_widget.set_refresh_callback(self._request_kinematics_refresh)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.addWidget(self._build_zoom_group())
+        layout.addWidget(self._build_inspection_tabs())
         layout.addWidget(self._build_event_scroll_area(), stretch=1)
         layout.addWidget(self._build_console_group())
 
@@ -99,21 +95,67 @@ class ControlPanel(QWidget):
         scroll.setWidget(container)
         return scroll
 
-    def _build_zoom_group(self) -> QGroupBox:
-        group = QGroupBox("Zoom view")
-        g = QVBoxLayout(group)
+    def _build_inspection_tabs(self) -> QGroupBox:
+        group = QGroupBox("Inspection")
+        layout = QVBoxLayout(group)
+
+        self.inspection_tabs = QTabWidget()
+        zoom_page = QWidget()
+        zoom_layout = QVBoxLayout(zoom_page)
         self.zoom_label = QLabel("Click frame to inspect region")
         self.zoom_label.setMinimumHeight(180)
         self.zoom_label.setAlignment(Qt.AlignCenter)
         self.zoom_factor = QSpinBox()
         self.zoom_factor.setRange(1, 20)
         self.zoom_factor.setValue(10)
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Zoom factor"))
-        row.addWidget(self.zoom_factor)
-        g.addWidget(self.zoom_label)
-        g.addLayout(row)
+        zoom_row = QHBoxLayout()
+        zoom_row.addWidget(QLabel("Zoom factor"))
+        zoom_row.addWidget(self.zoom_factor)
+        zoom_layout.addWidget(self.zoom_label)
+        zoom_layout.addLayout(zoom_row)
+
+        self.kinematics_widget = KinematicsWidget()
+        self.inspection_tabs.addTab(zoom_page, "Zoom")
+        self.inspection_tabs.addTab(self.kinematics_widget, "Kinematics")
+        layout.addWidget(self.inspection_tabs)
         return group
+
+    def set_tracking_service(self, tracking: TrackingService | None) -> None:
+        self._tracking_service = tracking if tracking is not None and tracking.is_loaded else None
+        self.kinematics_widget.set_tracking(self._tracking_service)
+
+    def _request_kinematics_refresh(self) -> None:
+        self.kinematics_refresh_requested.emit()
+
+    def refresh_kinematics(self) -> None:
+        rat_a, rat_b = self._default_kinematics_rats()
+        self.kinematics_widget.set_event_timing(
+            self.start_unix,
+            self.end_unix,
+            default_rat_a=rat_a,
+            default_rat_b=rat_b,
+        )
+        self.kinematics_widget.apply_role_defaults(rat_a, rat_b)
+        self.kinematics_widget.set_tracking(self._tracking_service)
+        self.kinematics_widget.refresh_plot()
+
+    def _default_kinematics_rats(self) -> tuple[str, str]:
+        initiator = self._first_animal_with_role("initiator")
+        victim = self._first_animal_with_role("victim")
+        return initiator, victim
+
+    def _first_animal_with_role(self, role: str) -> str:
+        col = ROLE_TO_COLUMN.get(role)
+        if col is None:
+            return ""
+        for row, name in enumerate(self.animal_names):
+            item = self.roles_table.item(row, col)
+            if item is not None and item.checkState() == Qt.Checked:
+                return name
+        return ""
+
+    def _emit_kinematics_refresh(self) -> None:
+        self.kinematics_refresh_requested.emit()
 
     def _build_mode_group(self) -> QGroupBox:
         group = QGroupBox("Event mode")
@@ -146,7 +188,6 @@ class ControlPanel(QWidget):
         self.event_type_combo.setEditable(True)
         self.event_type_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self.event_type_combo.view().setMinimumWidth(280)
-        self.event_type_combo.addItems(["fight", "chase", "push", "defend", "rob"])
         layout.addRow("Event type", self.event_type_combo)
 
         self.start_time_edit = QLineEdit()
@@ -347,6 +388,7 @@ class ControlPanel(QWidget):
         self.name_table.setFixedWidth(max(60, fitted_width))
         self.name_table.blockSignals(False)
         self.roles_table.blockSignals(False)
+        self._emit_kinematics_refresh()
 
     def _on_role_item_changed(self, item: QTableWidgetItem) -> None:
         role = self.roles_table.horizontalHeaderItem(item.column()).text()
@@ -366,6 +408,8 @@ class ControlPanel(QWidget):
         if item.checkState() == Qt.Checked:
             self.pending_role_capture = (item.row(), role)
             self.zoom_label.setText(f"Click video to place {role} for {self.animal_names[item.row()]}")
+        if role in ("initiator", "victim"):
+            self._emit_kinematics_refresh()
 
     def handle_frame_click_for_role(self, x: float, y: float) -> None:
         self._update_zoom_preview(x, y)
@@ -432,6 +476,7 @@ class ControlPanel(QWidget):
         self.start_datetime = datetime.fromisoformat(self._current_dt) if self._current_dt else None
         self.start_unix = self._current_unix
         self.start_time_edit.setText(f"{self._current_dt} ({self._current_unix:.6f}) frame={self.start_frame}")
+        self._emit_kinematics_refresh()
 
     def _set_end_time_from_current(self) -> None:
         if not hasattr(self, "_current_frame"):
@@ -441,6 +486,7 @@ class ControlPanel(QWidget):
         self.end_datetime = datetime.fromisoformat(self._current_dt) if self._current_dt else None
         self.end_unix = self._current_unix
         self.end_time_edit.setText(f"{self._current_dt} ({self._current_unix:.6f}) frame={self.end_frame}")
+        self._emit_kinematics_refresh()
 
     def _submit_event(self) -> None:
         if self.btn_mode_modify.isChecked() and self._editing_iloc is None:
@@ -524,6 +570,7 @@ class ControlPanel(QWidget):
                 item.setCheckState(Qt.Unchecked)
                 item.setData(Qt.UserRole, None)
         self.roles_table.blockSignals(False)
+        self._emit_kinematics_refresh()
 
     @staticmethod
     def _event_field_str(event: dict, key: str) -> str:
@@ -623,6 +670,7 @@ class ControlPanel(QWidget):
             self.end_unix = None
             self.end_frame = None
             self.end_time_edit.clear()
+        self._emit_kinematics_refresh()
 
     def _apply_role_columns_from_event(self, event: dict) -> None:
         self.roles_table.blockSignals(True)
@@ -701,4 +749,6 @@ class ControlPanel(QWidget):
 
         if payload is not None:
             self._apply_role_points_payload(payload)
+
+        self._emit_kinematics_refresh()
 

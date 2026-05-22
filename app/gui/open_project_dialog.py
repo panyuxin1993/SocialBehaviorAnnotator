@@ -33,6 +33,8 @@ class OpenProjectDialog(QDialog):
         self._key_video_path = "paths/video_path"
         self._key_timestamp_path = "paths/timestamp_path"
         self._key_annotation_path = "paths/annotation_path"
+        self._key_tracking_dir = "paths/tracking_dir"
+        self._key_tracking_path = "paths/tracking_path"
 
         self._video_edit = QLineEdit()
         self._video_edit.setPlaceholderText("Path to video file…")
@@ -40,10 +42,12 @@ class OpenProjectDialog(QDialog):
         self._ts_edit.setPlaceholderText("Path to timestamp file (.npy or .json)…")
         self._ann_edit = QLineEdit()
         self._ann_edit.setPlaceholderText("Path to annotation table (.csv / .xlsx) or create new…")
+        self._tracking_edit = QLineEdit()
+        self._tracking_edit.setPlaceholderText("Optional: tracking CSV (e.g. TQT.csv)…")
         self._restore_last_paths()
         self._last_video_dir_for_sync = self._path_dir(self._video_edit.text())
 
-        self._video_edit.editingFinished.connect(self._sync_timestamp_from_video)
+        self._video_edit.editingFinished.connect(self._sync_paths_from_video)
 
         btn_video = QPushButton("Browse…")
         btn_video.clicked.connect(self._browse_video)
@@ -55,6 +59,8 @@ class OpenProjectDialog(QDialog):
         btn_ann_new = QPushButton("Save as new…")
         btn_ann_new.setToolTip("Pick path for a new annotation file")
         btn_ann_new.clicked.connect(self._browse_annotation_new)
+        btn_tracking = QPushButton("Browse…")
+        btn_tracking.clicked.connect(self._browse_tracking)
 
         row_video = QHBoxLayout()
         row_video.addWidget(self._video_edit)
@@ -69,10 +75,15 @@ class OpenProjectDialog(QDialog):
         row_ann.addWidget(btn_ann_open)
         row_ann.addWidget(btn_ann_new)
 
+        row_tracking = QHBoxLayout()
+        row_tracking.addWidget(self._tracking_edit)
+        row_tracking.addWidget(btn_tracking)
+
         form = QFormLayout()
         form.addRow("Video:", self._wrap_row(row_video))
         form.addRow("Timestamps:", self._wrap_row(row_ts))
         form.addRow("Annotation table:", self._wrap_row(row_ann))
+        form.addRow("Tracking (optional):", self._wrap_row(row_tracking))
 
         hint = QLabel(
             "Fill paths manually or use Browse. For a new table, use “Save as new…” or type a path that does not exist yet."
@@ -107,7 +118,18 @@ class OpenProjectDialog(QDialog):
         if path:
             self._video_edit.setText(path)
             self._remember_selected_path(path, self._key_video_dir, self._key_video_path)
-            self._sync_timestamp_from_video()
+            self._sync_paths_from_video()
+
+    def _browse_tracking(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select tracking CSV",
+            self._start_dir(self._tracking_edit.text(), self._key_tracking_dir),
+            "CSV files (*.csv);;All Files (*)",
+        )
+        if path:
+            self._tracking_edit.setText(path)
+            self._remember_selected_path(path, self._key_tracking_dir, self._key_tracking_path)
 
     def _browse_timestamp(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -147,12 +169,14 @@ class OpenProjectDialog(QDialog):
         self._persist_from_line_edit(self._video_edit.text(), self._key_video_dir, self._key_video_path)
         self._persist_from_line_edit(self._ts_edit.text(), self._key_timestamp_dir, self._key_timestamp_path)
         self._persist_from_line_edit(self._ann_edit.text(), self._key_annotation_dir, self._key_annotation_path)
+        self._persist_from_line_edit(self._tracking_edit.text(), self._key_tracking_dir, self._key_tracking_path)
         super().accept()
 
     def _restore_last_paths(self) -> None:
         self._video_edit.setText(str(self._settings.value(self._key_video_path, "")))
         self._ts_edit.setText(str(self._settings.value(self._key_timestamp_path, "")))
         self._ann_edit.setText(str(self._settings.value(self._key_annotation_path, "")))
+        self._tracking_edit.setText(str(self._settings.value(self._key_tracking_path, "")))
 
     def _start_dir(self, current_text: str, scoped_dir_key: str) -> str:
         text = (current_text or "").strip()
@@ -207,7 +231,7 @@ class OpenProjectDialog(QDialog):
             return p.parent
         return None
 
-    def _sync_timestamp_from_video(self) -> None:
+    def _sync_paths_from_video(self) -> None:
         video_text = self._video_edit.text().strip()
         if not video_text:
             return
@@ -216,19 +240,40 @@ class OpenProjectDialog(QDialog):
         if video_dir is None:
             return
 
-        # Only auto-update if ts is empty or still following prior video directory.
+        stem = video_path.stem
+
         ts_text = self._ts_edit.text().strip()
         ts_dir = self._path_dir(ts_text) if ts_text else None
-        can_override = (not ts_text) or (ts_dir is not None and self._last_video_dir_for_sync is not None and ts_dir == self._last_video_dir_for_sync)
-        if not can_override:
-            self._last_video_dir_for_sync = video_dir
-            return
+        can_override_ts = (not ts_text) or (
+            ts_dir is not None
+            and self._last_video_dir_for_sync is not None
+            and ts_dir == self._last_video_dir_for_sync
+        )
+        if can_override_ts:
+            ts_candidates = [video_dir / f"{stem}_ts.npy", video_dir / f"{stem}_ts.json"]
+            chosen_ts = next((c for c in ts_candidates if c.exists()), ts_candidates[0])
+            self._ts_edit.setText(str(chosen_ts))
+            self._remember_selected_path(str(chosen_ts), self._key_timestamp_dir, self._key_timestamp_path)
 
-        stem = video_path.stem
-        candidates = [video_dir / f"{stem}_ts.npy", video_dir / f"{stem}_ts.json"]
-        chosen = next((c for c in candidates if c.exists()), candidates[0])
-        self._ts_edit.setText(str(chosen))
-        self._remember_selected_path(str(chosen), self._key_timestamp_dir, self._key_timestamp_path)
+        tracking_text = self._tracking_edit.text().strip()
+        tracking_dir = self._path_dir(tracking_text) if tracking_text else None
+        can_override_tracking = (not tracking_text) or (
+            tracking_dir is not None
+            and self._last_video_dir_for_sync is not None
+            and tracking_dir == self._last_video_dir_for_sync
+        )
+        if can_override_tracking:
+            tracking_candidates = [
+                video_dir / f"{stem}.csv",
+                video_dir / f"{stem}_tracking.csv",
+            ]
+            chosen_tracking = next((c for c in tracking_candidates if c.exists()), None)
+            if chosen_tracking is not None:
+                self._tracking_edit.setText(str(chosen_tracking))
+                self._remember_selected_path(
+                    str(chosen_tracking), self._key_tracking_dir, self._key_tracking_path
+                )
+
         self._last_video_dir_for_sync = video_dir
 
     def video_path(self) -> str:
@@ -239,3 +284,6 @@ class OpenProjectDialog(QDialog):
 
     def annotation_path(self) -> str:
         return self._ann_edit.text().strip()
+
+    def tracking_path(self) -> str:
+        return self._tracking_edit.text().strip()

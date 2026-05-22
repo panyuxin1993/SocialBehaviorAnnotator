@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -11,7 +13,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from app.gui.ethogram_widget import fallback_event_type_hex, parse_event_color_hex
+from app.color_utils import fallback_event_type_hex, parse_event_color_hex
+from app.config_loader import example_event_types_csv_path, parse_event_types_csv, repo_config_dir
 
 
 class EventTypeEditor(QDialog):
@@ -55,11 +58,14 @@ class EventTypeEditor(QDialog):
         buttons_row = QHBoxLayout()
         add_btn = QPushButton("Add row")
         add_btn.clicked.connect(self._add_row)
+        load_defaults_btn = QPushButton("Load defaults…")
+        load_defaults_btn.clicked.connect(self._load_shipped_defaults)
         load_btn = QPushButton("Load CSV…")
         load_btn.clicked.connect(self._load_csv)
         save_btn = QPushButton("Export CSV…")
         save_btn.clicked.connect(self._save_csv)
         buttons_row.addWidget(add_btn)
+        buttons_row.addWidget(load_defaults_btn)
         buttons_row.addWidget(load_btn)
         buttons_row.addWidget(save_btn)
         buttons_row.addStretch(1)
@@ -101,45 +107,43 @@ class EventTypeEditor(QDialog):
             unique.append(triple)
         return unique
 
+    def _fill_table_from_specs(self, triples: list[tuple[str, str, str]]) -> None:
+        self.table.setRowCount(0)
+        for abbr, type_name, color_hex in triples:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(abbr))
+            self.table.setItem(row, 1, QTableWidgetItem(type_name))
+            self.table.setItem(row, 2, QTableWidgetItem(color_hex))
+
+    def _load_shipped_defaults(self) -> None:
+        path = example_event_types_csv_path()
+        if not path.is_file():
+            path = repo_config_dir() / "event_types.csv"
+        if not path.is_file():
+            return
+        try:
+            triples = parse_event_types_csv(path)
+            if triples:
+                self._fill_table_from_specs(triples)
+        except OSError:
+            return
+
     def _load_csv(self) -> None:
+        start_dir = self.default_csv_dir or str(repo_config_dir())
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Load event types CSV",
-            self.default_csv_dir,
+            start_dir,
             "CSV files (*.csv);;All files (*)",
         )
         if not path:
             return
         try:
-            import csv
-
-            with open(path, newline="", encoding="utf-8") as f:
-                reader = csv.reader(f)
-                rows = list(reader)
-            if not rows:
-                return
-            headers = [h.strip().lower() for h in rows[0]]
-            data_rows = rows[1:]
-
-            abbr_idx = headers.index("abbr") if "abbr" in headers else 0
-            type_idx = headers.index("type") if "type" in headers else min(1, len(headers) - 1)
-            color_idx = headers.index("color") if "color" in headers else None
-
-            self.table.setRowCount(0)
-            for raw in data_rows:
-                if not raw:
-                    continue
-                abbr = raw[abbr_idx].strip() if abbr_idx < len(raw) else ""
-                type_name = raw[type_idx].strip() if type_idx < len(raw) else ""
-                color_cell = ""
-                if color_idx is not None and color_idx < len(raw):
-                    color_cell = raw[color_idx].strip()
-                row = self.table.rowCount()
-                self.table.insertRow(row)
-                self.table.setItem(row, 0, QTableWidgetItem(abbr))
-                self.table.setItem(row, 1, QTableWidgetItem(type_name))
-                self.table.setItem(row, 2, QTableWidgetItem(color_cell))
-        except Exception:
+            triples = parse_event_types_csv(Path(path))
+            if triples:
+                self._fill_table_from_specs(triples)
+        except OSError:
             return
 
     def _save_csv(self) -> None:

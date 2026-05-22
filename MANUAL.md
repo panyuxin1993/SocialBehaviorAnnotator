@@ -18,15 +18,24 @@ Shows current frame time and position:
 - datetime string
 - unix timestamp
 - frame index
+- tracking load status (file name and subject count when a tracking CSV is loaded)
+- **Show tracking** checkbox to toggle the tracking overlay
 
 ### Main video frame
 - Displays current frame.
 - Clicking the frame sends normalized coordinates to the annotation workflow.
-- Role points can be overlaid with role labels.
+- **Tracking overlay** (optional): filled circles at each subject’s `*_center_x/y` pixel position from a tracking CSV (e.g. `TQT.csv`), labeled by subject id, color-coded per subject.
+- **Role markers** (annotation): hollow circles at normalized click positions for initiator, victim, etc.
+
+Load tracking via **File → Open project inputs** (optional **Tracking** field) or **File → Load tracking CSV…**. Rows are aligned to video frames by matching each frame’s timestamp to the nearest tracking `timestamp`.
 
 ---
 
 ## 2) Control Panel (right, full height)
+
+### Inspection tabs (Zoom / Kinematics)
+- **Zoom**: magnified crop around the last video click (unchanged).
+- **Kinematics**: three time-aligned plots (distance, relative speed, egocentric angle) for two tracking subjects. Default window: **event start − 2 s** through **event end + 2 s** (or start + 2 s if no end). Red dashed line = event start; orange = event end. Default rats: first checked **initiator** (focal) and **victim** (target). Requires a loaded tracking CSV and event start time.
 
 ### Zoom view
 - Shows a zoomed crop centered at the last click location.

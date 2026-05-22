@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
     QComboBox,
+    QFileDialog,
     QLineEdit,
     QMainWindow,
     QMessageBox,
@@ -28,8 +29,10 @@ from app.gui.control_panel import ControlPanel
 from app.gui.navigator_panel import NavigatorPanel
 from app.gui.event_type_editor import EventTypeEditor
 from app.gui.animal_list_editor import AnimalListEditor
+from app.config_loader import repo_config_dir
 from app.services.annotation_service import AnnotationService
 from app.services.timestamp_service import TimestampService
+from app.services.tracking_service import TrackingService
 from app.services.video_service import VideoService
 
 
@@ -43,6 +46,7 @@ class MainWindow(QMainWindow):
 
         self.video_service = VideoService()
         self.timestamp_service = TimestampService()
+        self.tracking_service = TrackingService()
         self.annotation_service = AnnotationService()
 
         self.video_panel = VideoPanel()
@@ -120,6 +124,7 @@ class MainWindow(QMainWindow):
         self.navigator_panel.next_event_requested.connect(self._jump_to_next_event)
         self.navigator_panel.previous_event_requested.connect(self._jump_to_previous_event)
         self.control_panel.bind_set_time_actions()
+        self.control_panel.kinematics_refresh_requested.connect(self.control_panel.refresh_kinematics)
 
     def _init_menu(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -131,6 +136,9 @@ class MainWindow(QMainWindow):
 
         save_action = file_menu.addAction("Save annotations")
         save_action.triggered.connect(self._save_annotations)
+
+        load_tracking_action = file_menu.addAction("Load tracking CSV…")
+        load_tracking_action.triggered.connect(self._load_tracking_csv)
 
         annotation_menu = self.menuBar().addMenu("Annotation")
         edit_types_action = annotation_menu.addAction("Event types…")
@@ -146,6 +154,7 @@ class MainWindow(QMainWindow):
         video_path = dialog.video_path()
         timestamp_path = dialog.timestamp_path()
         table_path = dialog.annotation_path()
+        tracking_path = dialog.tracking_path()
 
         if not video_path:
             QMessageBox.warning(self, "Missing video", "Please set the video file path.")
@@ -183,6 +192,8 @@ class MainWindow(QMainWindow):
                 animal_names = [name.strip() for name in text.split(",") if name.strip()]
 
             self.annotation_service.load_or_create_table(table_path, animal_names)
+            self._load_or_clear_tracking(tracking_path)
+            self._sync_tracking_to_control_panel()
             self.control_panel.set_animal_names(self.annotation_service.animal_names)
             self.navigator_panel.ethogram.set_data(
                 self.annotation_service.annotations,
@@ -201,6 +212,12 @@ class MainWindow(QMainWindow):
             self.control_panel.append_log(f"Project loaded: video={video_path}")
             self.control_panel.append_log(f"Timestamps: {timestamp_path}")
             self.control_panel.append_log(f"Annotations: {table_path}")
+            if self.tracking_service.is_loaded and self.tracking_service.source_path is not None:
+                self.control_panel.append_log(
+                    f"Tracking: {self.tracking_service.source_path} "
+                    f"({self.tracking_service.row_count} rows, "
+                    f"{len(self.tracking_service.subjects)} subjects)"
+                )
         except Exception as exc:
             QMessageBox.critical(self, "Failed to load project", str(exc))
             self.control_panel.append_log(f"ERROR: load failed — {exc}")
@@ -228,11 +245,98 @@ class MainWindow(QMainWindow):
 
         actual_index = int(self.video_service.current_frame_index)
         dt_value, unix_value = self.timestamp_service.timestamp_for_frame(actual_index)
+        tracking_poses = self._tracking_poses_for_frame(actual_index)
+        self._apply_tracking_overlay(tracking_poses, refresh=False)
         self.video_panel.set_frame(frame, actual_index, dt_value, unix_value)
         self.control_panel.set_current_frame_image(frame)
         self.control_panel.set_current_time(actual_index, dt_value, unix_value)
         self.navigator_panel.set_current_frame(actual_index, self.video_service.total_frames)
         self.navigator_panel.ethogram.set_playhead(actual_index)
+
+    def _sync_tracking_to_control_panel(self) -> None:
+        self.control_panel.set_tracking_service(self.tracking_service)
+        self.control_panel.refresh_kinematics()
+
+    def _load_or_clear_tracking(self, tracking_path: str) -> None:
+        path = (tracking_path or "").strip()
+        if not path:
+            self.tracking_service.clear()
+            self.video_panel.set_tracking_overlay({}, loaded=False)
+            self._sync_tracking_to_control_panel()
+            return
+        if not Path(path).is_file():
+            self.tracking_service.clear()
+            self.video_panel.set_tracking_overlay({}, loaded=False)
+            self.control_panel.append_log(f"Tracking file not found (skipped): {path}")
+            self._sync_tracking_to_control_panel()
+            return
+        self.tracking_service.load_file(path)
+        name = self.tracking_service.source_path.name if self.tracking_service.source_path else path
+        self.video_panel.set_tracking_overlay(
+            {},
+            subjects=self.tracking_service.subjects,
+            loaded=True,
+            source_name=name,
+        )
+        self._sync_tracking_to_control_panel()
+
+    def _tracking_poses_for_frame(self, frame_index: int) -> dict[str, tuple[float, float]]:
+        if not self.tracking_service.is_loaded:
+            return {}
+        return self.tracking_service.poses_for_frame(
+            frame_index,
+            self.timestamp_service.timestamps,
+        )
+
+    def _apply_tracking_overlay(
+        self,
+        poses: dict[str, tuple[float, float]],
+        *,
+        refresh: bool = True,
+    ) -> None:
+        if not self.tracking_service.is_loaded:
+            self.video_panel.set_tracking_overlay({}, loaded=False, refresh=refresh)
+            return
+        name = self.tracking_service.source_path.name if self.tracking_service.source_path else ""
+        self.video_panel.set_tracking_overlay(
+            poses,
+            subjects=self.tracking_service.subjects,
+            loaded=True,
+            source_name=name,
+            refresh=refresh,
+        )
+
+    def _update_tracking_overlay(self, frame_index: int) -> None:
+        self._apply_tracking_overlay(self._tracking_poses_for_frame(frame_index))
+
+    def _load_tracking_csv(self) -> None:
+        start_dir = ""
+        if self.tracking_service.source_path is not None:
+            start_dir = str(self.tracking_service.source_path.parent)
+        elif self.annotation_service.table_path is not None:
+            start_dir = str(self.annotation_service.table_path.parent)
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load tracking CSV",
+            start_dir,
+            "CSV files (*.csv);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            self.tracking_service.load_file(path)
+            self._apply_tracking_overlay(
+                self._tracking_poses_for_frame(self.video_service.current_frame_index)
+            )
+            self._sync_tracking_to_control_panel()
+            self.control_panel.append_log(
+                f"Tracking loaded: {path} ({self.tracking_service.row_count} rows, "
+                f"{len(self.tracking_service.subjects)} subjects)"
+            )
+            self.statusBar().showMessage("Tracking loaded.", 3000)
+        except Exception as exc:
+            QMessageBox.warning(self, "Tracking load failed", str(exc))
+            self.control_panel.append_log(f"ERROR: tracking load — {exc}")
 
     def _seek_to_datetime(self, dt_text: str) -> None:
         if not self.timestamp_service.timestamps:
@@ -332,7 +436,7 @@ class MainWindow(QMainWindow):
     def _edit_event_types(self) -> None:
         """Open a dialog to edit the list of event types shown in the control panel."""
         specs = self.control_panel.event_type_specs()
-        default_csv_dir = ""
+        default_csv_dir = str(repo_config_dir())
         if self.annotation_service.table_path is not None:
             default_csv_dir = str(self.annotation_service.table_path.parent)
         dialog = EventTypeEditor(specs, self, default_csv_dir=default_csv_dir)
