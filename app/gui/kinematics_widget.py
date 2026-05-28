@@ -4,7 +4,8 @@ from typing import Callable
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from PySide6.QtWidgets import QComboBox, QFormLayout, QLabel, QVBoxLayout, QWidget
+from matplotlib.offsetbox import AnchoredOffsetbox, HPacker, TextArea
+from PySide6.QtWidgets import QComboBox, QFormLayout, QLabel, QVBoxLayout, QWidget, QHBoxLayout
 
 from app.gui.colors import ANIMAL_COLORS
 from app.services.kinematics_service import KinematicsSeries, compute_pair_kinematics, resolve_tracking_subject
@@ -19,11 +20,15 @@ class KinematicsWidget(QWidget):
         self._tracking: TrackingService | None = None
         self._start_unix: float | None = None
         self._end_unix: float | None = None
+        self._event_type: str = ""
         self._default_rat_a: str = ""
         self._default_rat_b: str = ""
         self._user_picked_a = False
         self._user_picked_b = False
         self._refresh_callback: Callable[[], None] | None = None
+        self._axes: list = []
+        self._playhead_lines: list = []
+        self._playhead_rel_t: float | None = None
 
         self.rat_a_combo = QComboBox()
         self.rat_b_combo = QComboBox()
@@ -32,9 +37,23 @@ class KinematicsWidget(QWidget):
         self.rat_a_combo.currentTextChanged.connect(self._on_rat_a_changed)
         self.rat_b_combo.currentTextChanged.connect(self._on_rat_b_changed)
 
-        picker_row = QFormLayout()
-        picker_row.addRow("Focal rat (A)", self.rat_a_combo)
-        picker_row.addRow("Target rat (B)", self.rat_b_combo)
+        picker_row = QHBoxLayout()
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(10)
+
+        label_a = QLabel("Focal rat (A)")
+        label_b = QLabel("Target rat (B)")
+
+        row_layout.addWidget(label_a)
+        row_layout.addWidget(self.rat_a_combo)
+        row_layout.addWidget(label_b)
+        row_layout.addWidget(self.rat_b_combo)
+
+        picker_row.addWidget(row_widget)
+   
+   
 
         self._figure = Figure(figsize=(4.2, 3.6), tight_layout=True)
         self._canvas = FigureCanvas(self._figure)
@@ -70,9 +89,11 @@ class KinematicsWidget(QWidget):
         *,
         default_rat_a: str = "",
         default_rat_b: str = "",
+        event_type: str = "",
     ) -> None:
         self._start_unix = start_unix
         self._end_unix = end_unix
+        self._event_type = (event_type or "").strip()
         if default_rat_a:
             self._default_rat_a = default_rat_a
         if default_rat_b:
@@ -111,6 +132,17 @@ class KinematicsWidget(QWidget):
         self._default_rat_a = rat_a
         self._default_rat_b = rat_b
         self._rebuild_subject_combos()
+
+    def set_playhead_unix(self, current_unix: float | None) -> None:
+        """Move dotted playhead to current video time (seconds relative to event start)."""
+        if not self._playhead_lines or self._start_unix is None or current_unix is None:
+            return
+        rel_t = float(current_unix) - float(self._start_unix)
+        self._playhead_rel_t = rel_t
+        for line in self._playhead_lines:
+            line.set_xdata([rel_t, rel_t])
+            line.set_visible(True)
+        self._canvas.draw_idle()
 
     def refresh_plot(self) -> None:
         if self._tracking is None:
@@ -151,6 +183,9 @@ class KinematicsWidget(QWidget):
         )
 
     def _clear_figure(self, message: str) -> None:
+        self._axes = []
+        self._playhead_lines = []
+        self._playhead_rel_t = None
         self._figure.clear()
         ax = self._figure.add_subplot(111)
         ax.axis("off")
@@ -182,7 +217,7 @@ class KinematicsWidget(QWidget):
         # Distance: single symmetric metric
         axes[0].plot(s.times_s, s.distance_px, color="#000000", linewidth=1.2, label="distance")
         axes[0].set_ylabel("Distance (px)", fontsize=8)
-
+        axes[1].plot(s.times_s, 0*s.times_s, color="#000000", linewidth=0.5, label="zero")
         axes[1].plot(
             s.times_s,
             s.relative_speed_a_px_s,
@@ -204,22 +239,21 @@ class KinematicsWidget(QWidget):
             s.egocentric_angle_a_deg,
             color=color_a,
             linewidth=1.2,
-            label=f"{s.rat_a} → {s.rat_b}",
+            label=f"{s.rat_a}",
         )
         axes[2].plot(
             s.times_s,
             s.egocentric_angle_b_deg,
             color=color_b,
             linewidth=1.2,
-            label=f"{s.rat_b} → {s.rat_a}",
+            label=f"{s.rat_b}",
         )
         x_min, x_max = s.times_s.min(), s.times_s.max()
-        axes[2].plot([x_min, x_max], [-90, -90], color="#000000", linestyle="--", linewidth=1.2)
-        axes[2].plot([x_min, x_max], [90, 90], color="#000000", linestyle="--", linewidth=1.2)
+        axes[2].plot([x_min, x_max], [-90, -90], color="#000000", linestyle="--", linewidth=0.5)
+        axes[2].plot([x_min, x_max], [90, 90], color="#000000", linestyle="--", linewidth=0.5)
         axes[2].set_ylabel("Egocentric angle \n (deg)", fontsize=8)
 
         for ax in axes:
-            ax.grid(True, alpha=0.3)
             ax.axvline(s.event_start_s, color="#E53935", linestyle="--", linewidth=1.2)
             if s.event_end_s is not None:
                 ax.axvline(s.event_end_s, color="#FB8C00", linestyle="--", linewidth=1.2)
@@ -227,9 +261,63 @@ class KinematicsWidget(QWidget):
         axes[0].plot([], [], color="#E53935", linestyle="--", label="event start")
         if s.event_end_s is not None:
             axes[0].plot([], [], color="#FB8C00", linestyle="--", label="event end")
-        axes[1].legend(loc="upper right", fontsize=6)
-        axes[2].legend(loc="upper right", fontsize=6)
+        # axes[1].legend(loc="upper right", fontsize=6, frameon=False)
+        # axes[2].legend(loc="upper right", fontsize=6, frameon=False)
+   
 
         axes[-1].set_xlabel("Time relative to event start (s)")
-        axes[0].set_title(f"Kinematics: {s.rat_a} & {s.rat_b}", fontsize=9)
+        self._add_colored_title(axes[0], s.rat_a, s.rat_b, color_a, color_b, self._event_type)
+
+        self._axes = list(axes)
+        self._playhead_lines = []
+        for ax in axes:
+            line = ax.axvline(
+                0.0,
+                color="#37474F",
+                linestyle=":",
+                linewidth=1.6,
+                zorder=10,
+                visible=False,
+            )
+            self._playhead_lines.append(line)
+        if self._playhead_rel_t is not None:
+            for line in self._playhead_lines:
+                line.set_xdata([self._playhead_rel_t, self._playhead_rel_t])
+                line.set_visible(True)
+
         self._canvas.draw_idle()
+
+    @staticmethod
+    def _add_colored_title(
+        ax,
+        rat_a: str,
+        rat_b: str,
+        color_a: str,
+        color_b: str,
+        event_type: str,
+    ) -> None:
+        """Title with each rat name colored to match its curve."""
+        text_kw = dict(fontsize=9)
+
+        def part(text: str, color: str = "black", weight: str = "normal") -> TextArea:
+            return TextArea(text, textprops={**text_kw, "color": color, "weight": weight})
+
+        children = [
+            part("Kinematics: "),
+            part(rat_a, color=color_a, weight="bold"),
+            part(" & "),
+            part(rat_b, color=color_b, weight="bold"),
+        ]
+        if event_type:
+            children.append(part(f" — {event_type}"))
+
+        box = HPacker(children=children, align="center", pad=0, sep=0)
+        anchored = AnchoredOffsetbox(
+            loc="lower center",
+            child=box,
+            frameon=False,
+            bbox_to_anchor=(0.5, 1.02),
+            bbox_transform=ax.transAxes,
+            borderpad=0,
+        )
+        ax.add_artist(anchored)

@@ -134,10 +134,22 @@ class ControlPanel(QWidget):
             self.end_unix,
             default_rat_a=rat_a,
             default_rat_b=rat_b,
+            event_type=self._current_event_type_label(),
         )
         self.kinematics_widget.apply_role_defaults(rat_a, rat_b)
         self.kinematics_widget.set_tracking(self._tracking_service)
         self.kinematics_widget.refresh_plot()
+        if hasattr(self, "_current_unix"):
+            self.update_kinematics_playhead(self._current_unix)
+
+    def update_kinematics_playhead(self, current_unix: float) -> None:
+        self.kinematics_widget.set_playhead_unix(current_unix)
+
+    def _current_event_type_label(self) -> str:
+        text = self.event_type_combo.currentText().strip()
+        if not text:
+            return ""
+        return self.display_type_for_combo(text)
 
     def _default_kinematics_rats(self) -> tuple[str, str]:
         initiator = self._first_animal_with_role("initiator")
@@ -188,6 +200,7 @@ class ControlPanel(QWidget):
         self.event_type_combo.setEditable(True)
         self.event_type_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self.event_type_combo.view().setMinimumWidth(280)
+        self.event_type_combo.currentTextChanged.connect(self._emit_kinematics_refresh)
         layout.addRow("Event type", self.event_type_combo)
 
         self.start_time_edit = QLineEdit()
@@ -350,8 +363,8 @@ class ControlPanel(QWidget):
         self.console = QPlainTextEdit()
         self.console.setReadOnly(True)
         self.console.setPlaceholderText("Status and log messages appear here…")
-        self.console.setMinimumHeight(120)
-        self.console.setMaximumHeight(220)
+        self.console.setMinimumHeight(100)
+        self.console.setMaximumHeight(200)
         font = QFont("Menlo")
         if not font.exactMatch():
             font = QFont("Courier New")

@@ -108,9 +108,11 @@ def compute_pair_kinematics(
     vx_rel = vbx - vax
     vy_rel = vby - vay
     heading_a = np.arctan2(vay, vax)
+    bearing_a = np.arctan2(yb - ya, xb - xa)
     heading_b = np.arctan2(vby, vbx)
-    relative_speed_a = vx_rel * np.cos(heading_a) + vy_rel * np.sin(heading_a)
-    relative_speed_b = (-vx_rel) * np.cos(heading_b) + (-vy_rel) * np.sin(heading_b)
+    bearing_b = np.arctan2(ya - yb, xa - xb)
+    relative_speed_a = vax * np.cos(bearing_a) + vay * np.sin(bearing_a)
+    relative_speed_b = vbx * np.cos(bearing_b) + vby * np.sin(bearing_b)
 
     egocentric_a = _egocentric_angle_deg(xa, ya, vax, vay, xb, yb)
     egocentric_b = _egocentric_angle_deg(xb, yb, vbx, vby, xa, ya)

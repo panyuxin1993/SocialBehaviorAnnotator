@@ -252,6 +252,7 @@ class MainWindow(QMainWindow):
         self.control_panel.set_current_time(actual_index, dt_value, unix_value)
         self.navigator_panel.set_current_frame(actual_index, self.video_service.total_frames)
         self.navigator_panel.ethogram.set_playhead(actual_index)
+        self.control_panel.update_kinematics_playhead(unix_value)
 
     def _sync_tracking_to_control_panel(self) -> None:
         self.control_panel.set_tracking_service(self.tracking_service)
