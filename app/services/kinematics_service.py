@@ -18,6 +18,10 @@ class KinematicsSeries:
     relative_speed_b_px_s: np.ndarray
     egocentric_angle_a_deg: np.ndarray  # focal rat_a → rat_b
     egocentric_angle_b_deg: np.ndarray  # focal rat_b → rat_a
+    area_a: np.ndarray
+    area_b: np.ndarray
+    perimeter_a: np.ndarray
+    perimeter_b: np.ndarray
     event_start_s: float  # 0.0 when times_s are relative to start
     event_end_s: float | None  # relative to start; None if open-ended
     rat_a: str
@@ -82,13 +86,26 @@ def compute_pair_kinematics(
     xb = np.full(len(times), np.nan)
     yb = np.full(len(times), np.nan)
 
-    for i, (_t, pose) in enumerate(samples):
-        pa = pose.get(sid_a)
-        pb = pose.get(sid_b)
-        if pa is None or pb is None:
+    area_a = np.full(len(times), np.nan)
+    area_b = np.full(len(times), np.nan)
+    perimeter_a = np.full(len(times), np.nan)
+    perimeter_b = np.full(len(times), np.nan)
+
+    for i, (_t, frame) in enumerate(samples):
+        fa = frame.get(sid_a)
+        fb = frame.get(sid_b)
+        if fa is None or fb is None:
             continue
-        xa[i], ya[i] = pa
-        xb[i], yb[i] = pb
+        xa[i], ya[i] = fa.x, fa.y
+        xb[i], yb[i] = fb.x, fb.y
+        if fa.area is not None:
+            area_a[i] = fa.area
+        if fb.area is not None:
+            area_b[i] = fb.area
+        if fa.perimeter is not None:
+            perimeter_a[i] = fa.perimeter
+        if fb.perimeter is not None:
+            perimeter_b[i] = fb.perimeter
 
     valid = np.isfinite(xa) & np.isfinite(ya) & np.isfinite(xb) & np.isfinite(yb)
     if np.count_nonzero(valid) < 3:
@@ -97,6 +114,8 @@ def compute_pair_kinematics(
     times = times[valid]
     rel_t = rel_t[valid]
     xa, ya, xb, yb = xa[valid], ya[valid], xb[valid], yb[valid]
+    area_a, area_b = area_a[valid], area_b[valid]
+    perimeter_a, perimeter_b = perimeter_a[valid], perimeter_b[valid]
 
     distance = np.hypot(xb - xa, yb - ya)
 
@@ -124,6 +143,10 @@ def compute_pair_kinematics(
         relative_speed_b_px_s=relative_speed_b,
         egocentric_angle_a_deg=egocentric_a,
         egocentric_angle_b_deg=egocentric_b,
+        area_a=area_a,
+        area_b=area_b,
+        perimeter_a=perimeter_a,
+        perimeter_b=perimeter_b,
         event_start_s=0.0,
         event_end_s=event_end_rel,
         rat_a=sid_a,
@@ -145,3 +168,7 @@ def _egocentric_angle_deg(
     bearing = np.arctan2(y_t - y_f, x_t - x_f)
     ego_rad = np.arctan2(np.sin(bearing - heading), np.cos(bearing - heading))
     return np.degrees(ego_rad)
+
+
+def series_has_scalar(values_a: np.ndarray, values_b: np.ndarray) -> bool:
+    return bool(np.any(np.isfinite(values_a)) or np.any(np.isfinite(values_b)))

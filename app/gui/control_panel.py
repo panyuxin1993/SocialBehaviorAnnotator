@@ -6,8 +6,8 @@ from typing import Dict, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QPixmap
+from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -39,6 +39,7 @@ from app.config_loader import load_event_type_specs
 from app.gui.colors import ANIMAL_COLORS
 from app.gui.kinematics_widget import KinematicsWidget
 from app.services.annotation_service import annotation_datetime_to_unix
+from app.services.kinematics_service import resolve_tracking_subject
 from app.services.tracking_service import TrackingService
 
 
@@ -65,6 +66,8 @@ class ControlPanel(QWidget):
         self._editing_iloc: Optional[int] = None
         self._loaded_event_id: str = ""
         self._tracking_service: TrackingService | None = None
+        #: Normalized (0–1) center from the last video click; refreshed on each seek.
+        self._zoom_center: Optional[Tuple[float, float]] = None
         self._build_ui()
         self.set_event_type_specs(load_event_type_specs())
         self.kinematics_widget.set_refresh_callback(self._request_kinematics_refresh)
@@ -108,6 +111,7 @@ class ControlPanel(QWidget):
         self.zoom_factor = QSpinBox()
         self.zoom_factor.setRange(1, 20)
         self.zoom_factor.setValue(10)
+        self.zoom_factor.valueChanged.connect(lambda _v: self._refresh_zoom_preview())
         zoom_row = QHBoxLayout()
         zoom_row.addWidget(QLabel("Zoom factor"))
         zoom_row.addWidget(self.zoom_factor)
@@ -123,6 +127,7 @@ class ControlPanel(QWidget):
     def set_tracking_service(self, tracking: TrackingService | None) -> None:
         self._tracking_service = tracking if tracking is not None and tracking.is_loaded else None
         self.kinematics_widget.set_tracking(self._tracking_service)
+        self._refresh_zoom_preview()
 
     def _request_kinematics_refresh(self) -> None:
         self.kinematics_refresh_requested.emit()
@@ -423,8 +428,11 @@ class ControlPanel(QWidget):
             self.zoom_label.setText(f"Click video to place {role} for {self.animal_names[item.row()]}")
         if role in ("initiator", "victim"):
             self._emit_kinematics_refresh()
+            if self._zoom_center is None:
+                self._refresh_zoom_preview()
 
     def handle_frame_click_for_role(self, x: float, y: float) -> None:
+        self._zoom_center = (x, y)
         self._update_zoom_preview(x, y)
         if self.pending_role_capture is None:
             return
@@ -461,20 +469,111 @@ class ControlPanel(QWidget):
             bytes_per_line,
             QImage.Format_RGB888,
         ).copy()
+        pix = QPixmap.fromImage(image)
+        self._paint_tracking_on_zoom(pix, x1, y1, x2 - x1, y2 - y1)
         target_size = self.zoom_label.size()
         if target_size.width() <= 0 or target_size.height() <= 0:
             return
-        pix = QPixmap.fromImage(image).scaled(
+        pix = pix.scaled(
             target_size,
             Qt.KeepAspectRatio,
             Qt.SmoothTransformation,
         )
         self.zoom_label.setPixmap(pix)
 
+    def _paint_tracking_on_zoom(
+        self, pixmap: QPixmap, crop_x1: int, crop_y1: int, crop_w: int, crop_h: int
+    ) -> None:
+        if self._tracking_service is None or not self._tracking_service.is_loaded:
+            return
+        if not hasattr(self, "_current_unix"):
+            return
+        poses = self._tracking_service.poses_for_unix(float(self._current_unix))
+        if not poses:
+            return
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        font = QFont()
+        font.setPointSize(max(7, min(11, max(1, pixmap.height()) // 36)))
+        font.setBold(True)
+        painter.setFont(font)
+        radius = max(4, min(10, max(1, pixmap.height()) // 18))
+        label_offset = radius + 4
+        subjects = self._tracking_service.subjects
+
+        for subject_id, (px, py) in sorted(poses.items()):
+            lx = int(px) - crop_x1
+            ly = int(py) - crop_y1
+            margin = radius + 40
+            if lx < -margin or ly < -margin or lx > crop_w + margin or ly > crop_h + margin:
+                continue
+            lx = int(max(0.0, min(float(crop_w - 1), lx)))
+            ly = int(max(0.0, min(float(crop_h - 1), ly)))
+            color = self._marker_color_for_subject(subject_id, subjects)
+            painter.setBrush(color)
+            painter.setPen(QPen(QColor("#202020"), 2))
+            painter.drawEllipse(QPoint(lx, ly), radius, radius)
+            painter.setPen(QPen(QColor("#FFFFFF"), 1))
+            painter.drawText(lx + label_offset, ly - label_offset, self._label_for_subject(subject_id, subjects))
+        painter.end()
+
+    def _label_for_subject(self, subject_id: str, subjects: list[str]) -> str:
+        for name in self.animal_names:
+            if resolve_tracking_subject(name, subjects) == subject_id:
+                return name
+        return subject_id.replace("_center", "")
+
+    def _marker_color_for_subject(self, subject_id: str, subjects: list[str]) -> QColor:
+        for row, name in enumerate(self.animal_names):
+            if resolve_tracking_subject(name, subjects) == subject_id:
+                return QColor(ANIMAL_COLORS[row % len(ANIMAL_COLORS)])
+        try:
+            idx = subjects.index(subject_id)
+        except ValueError:
+            idx = hash(subject_id) % len(ANIMAL_COLORS)
+        return QColor(ANIMAL_COLORS[idx % len(ANIMAL_COLORS)])
+
     def set_current_time(self, frame: int, dt_value: str, unix_value: float) -> None:
         self._current_frame = frame
         self._current_dt = dt_value
         self._current_unix = unix_value
+        self._refresh_zoom_preview()
+
+    def _refresh_zoom_preview(self) -> None:
+        center = self._zoom_center or self._tracking_zoom_center()
+        if center is None:
+            return
+        self._update_zoom_preview(center[0], center[1])
+
+    def _tracking_zoom_center(self) -> Optional[Tuple[float, float]]:
+        if self._tracking_service is None or not self._tracking_service.is_loaded:
+            return None
+        if self.current_frame_image is None or not hasattr(self, "_current_unix"):
+            return None
+        poses = self._tracking_service.poses_for_unix(float(self._current_unix))
+        if not poses:
+            return None
+        subjects = self._tracking_service.subjects
+        for name in (self._first_animal_with_role("initiator"), self._first_animal_with_role("victim")):
+            if not name:
+                continue
+            sid = resolve_tracking_subject(name, subjects)
+            if sid and sid in poses:
+                return self._pixel_to_normalized(*poses[sid])
+        sid = next(iter(sorted(poses.keys())))
+        return self._pixel_to_normalized(*poses[sid])
+
+    def _pixel_to_normalized(self, px: float, py: float) -> Tuple[float, float]:
+        if self.current_frame_image is None:
+            return 0.5, 0.5
+        h, w, _ = self.current_frame_image.shape
+        if w <= 0 or h <= 0:
+            return 0.5, 0.5
+        return (
+            max(0.0, min(1.0, px / w)),
+            max(0.0, min(1.0, py / h)),
+        )
 
     def bind_set_time_actions(self) -> None:
         self.btn_set_start.clicked.connect(self._set_start_time_from_current)

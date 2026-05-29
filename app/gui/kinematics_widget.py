@@ -8,7 +8,12 @@ from matplotlib.offsetbox import AnchoredOffsetbox, HPacker, TextArea
 from PySide6.QtWidgets import QComboBox, QFormLayout, QLabel, QVBoxLayout, QWidget, QHBoxLayout
 
 from app.gui.colors import ANIMAL_COLORS
-from app.services.kinematics_service import KinematicsSeries, compute_pair_kinematics, resolve_tracking_subject
+from app.services.kinematics_service import (
+    KinematicsSeries,
+    compute_pair_kinematics,
+    resolve_tracking_subject,
+    series_has_scalar,
+)
 from app.services.tracking_service import TrackingService
 
 
@@ -55,9 +60,9 @@ class KinematicsWidget(QWidget):
    
    
 
-        self._figure = Figure(figsize=(4.2, 3.6), tight_layout=True)
+        self._figure = Figure(figsize=(4.2, 5.2), tight_layout=True)
         self._canvas = FigureCanvas(self._figure)
-        self._canvas.setMinimumHeight(220)
+        self._canvas.setMinimumHeight(280)
         self._status = QLabel("Load tracking CSV and set event start to view kinematics.")
         self._status.setWordWrap(True)
         self._status.setStyleSheet("color: palette(mid);")
@@ -208,62 +213,114 @@ class KinematicsWidget(QWidget):
 
         return pick(rat_a), pick(rat_b)
 
+    @staticmethod
+    def _plot_pair_metric(
+        ax,
+        times_s,
+        values_a,
+        values_b,
+        *,
+        rat_a: str,
+        rat_b: str,
+        color_a: str,
+        color_b: str,
+        ylabel: str,
+    ) -> None:
+        ax.plot(times_s, values_a, color=color_a, linewidth=1.2, label=rat_a)
+        ax.plot(times_s, values_b, color=color_b, linewidth=1.2, label=rat_b)
+        ax.set_ylabel(ylabel, fontsize=8)
+
+    @staticmethod
+    def _decorate_event_window(ax, s: KinematicsSeries) -> None:
+        ax.grid(True, alpha=0.3)
+        ax.axvline(s.event_start_s, color="#E53935", linestyle="--", linewidth=1.2)
+        if s.event_end_s is not None:
+            ax.axvline(s.event_end_s, color="#FB8C00", linestyle="--", linewidth=1.2)
+
     def _draw_series(self, s: KinematicsSeries) -> None:
         self._figure.clear()
-        axes = self._figure.subplots(3, 1, sharex=True)
+        has_area = series_has_scalar(s.area_a, s.area_b)
+        has_perimeter = series_has_scalar(s.perimeter_a, s.perimeter_b)
+        nrows = 3 + int(has_area) + int(has_perimeter)
+        axes = self._figure.subplots(nrows, 1, sharex=True)
+        if nrows == 1:
+            axes = [axes]
+        else:
+            axes = list(axes)
+
         subjects = list(self._tracking.subjects) if self._tracking else []
         color_a, color_b = self._rat_colors(s.rat_a, s.rat_b, subjects)
+        row = 0
 
-        # Distance: single symmetric metric
-        axes[0].plot(s.times_s, s.distance_px, color="#000000", linewidth=1.2, label="distance")
-        axes[0].set_ylabel("Distance (px)", fontsize=8)
-        axes[1].plot(s.times_s, 0*s.times_s, color="#000000", linewidth=0.5, label="zero")
-        axes[1].plot(
+        axes[row].plot(s.times_s, s.distance_px, color="#000000", linewidth=1.2, label="distance")
+        axes[row].set_ylabel("Distance (px)", fontsize=8)
+        self._decorate_event_window(axes[row], s)
+        row += 1
+
+        self._plot_pair_metric(
+            axes[row],
             s.times_s,
             s.relative_speed_a_px_s,
-            color=color_a,
-            linewidth=1.2,
-            label=f"{s.rat_a} focal",
-        )
-        axes[1].plot(
-            s.times_s,
             s.relative_speed_b_px_s,
-            color=color_b,
-            linewidth=1.2,
-            label=f"{s.rat_b} focal",
+            rat_a=s.rat_a,
+            rat_b=s.rat_b,
+            color_a=color_a,
+            color_b=color_b,
+            ylabel="Relative speed\n(px/s)",
         )
-        axes[1].set_ylabel("Relative speed \n (px/s)", fontsize=8)
+        self._decorate_event_window(axes[row], s)
+        row += 1
 
-        axes[2].plot(
+        self._plot_pair_metric(
+            axes[row],
             s.times_s,
             s.egocentric_angle_a_deg,
-            color=color_a,
-            linewidth=1.2,
-            label=f"{s.rat_a}",
-        )
-        axes[2].plot(
-            s.times_s,
             s.egocentric_angle_b_deg,
-            color=color_b,
-            linewidth=1.2,
-            label=f"{s.rat_b}",
+            rat_a=s.rat_a,
+            rat_b=s.rat_b,
+            color_a=color_a,
+            color_b=color_b,
+            ylabel="Egocentric angle\n(deg)",
         )
         x_min, x_max = s.times_s.min(), s.times_s.max()
-        axes[2].plot([x_min, x_max], [-90, -90], color="#000000", linestyle="--", linewidth=0.5)
-        axes[2].plot([x_min, x_max], [90, 90], color="#000000", linestyle="--", linewidth=0.5)
-        axes[2].set_ylabel("Egocentric angle \n (deg)", fontsize=8)
+        axes[row].plot([x_min, x_max], [-90, -90], color="#000000", linestyle="--", linewidth=0.5)
+        axes[row].plot([x_min, x_max], [90, 90], color="#000000", linestyle="--", linewidth=0.5)
+        self._decorate_event_window(axes[row], s)
+        row += 1
 
-        for ax in axes:
-            ax.axvline(s.event_start_s, color="#E53935", linestyle="--", linewidth=1.2)
-            if s.event_end_s is not None:
-                ax.axvline(s.event_end_s, color="#FB8C00", linestyle="--", linewidth=1.2)
+        if has_area:
+            self._plot_pair_metric(
+                axes[row],
+                s.times_s,
+                s.area_a,
+                s.area_b,
+                rat_a=s.rat_a,
+                rat_b=s.rat_b,
+                color_a=color_a,
+                color_b=color_b,
+                ylabel="Area",
+            )
+            self._decorate_event_window(axes[row], s)
+            row += 1
+
+        if has_perimeter:
+            self._plot_pair_metric(
+                axes[row],
+                s.times_s,
+                s.perimeter_a,
+                s.perimeter_b,
+                rat_a=s.rat_a,
+                rat_b=s.rat_b,
+                color_a=color_a,
+                color_b=color_b,
+                ylabel="Perimeter",
+            )
+            self._decorate_event_window(axes[row], s)
+            row += 1
 
         axes[0].plot([], [], color="#E53935", linestyle="--", label="event start")
         if s.event_end_s is not None:
             axes[0].plot([], [], color="#FB8C00", linestyle="--", label="event end")
-        # axes[1].legend(loc="upper right", fontsize=6, frameon=False)
-        # axes[2].legend(loc="upper right", fontsize=6, frameon=False)
-   
 
         axes[-1].set_xlabel("Time relative to event start (s)")
         self._add_colored_title(axes[0], s.rat_a, s.rat_b, color_a, color_b, self._event_type)
