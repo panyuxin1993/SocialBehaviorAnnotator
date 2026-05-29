@@ -74,9 +74,24 @@ class ControlPanel(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.addWidget(self._build_inspection_tabs())
-        layout.addWidget(self._build_event_scroll_area(), stretch=1)
+
+        body = QHBoxLayout()
+        body.setSpacing(8)
+        inspection = self._build_inspection_tabs()
+        inspection.setMinimumWidth(260)
+        body.addWidget(inspection, stretch=1)
+        annotation = self._build_annotation_section()
+        annotation.setMinimumWidth(300)
+        body.addWidget(annotation, stretch=1)
+        layout.addLayout(body, stretch=1)
+
         layout.addWidget(self._build_console_group())
+
+    def _build_annotation_section(self) -> QGroupBox:
+        group = QGroupBox("Annotation")
+        layout = QVBoxLayout(group)
+        layout.addWidget(self._build_event_scroll_area())
+        return group
 
     def _build_event_scroll_area(self) -> QScrollArea:
         scroll = QScrollArea()
