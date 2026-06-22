@@ -45,6 +45,7 @@ class AnnotationService:
                 self.animal_names = animal_names_if_new
             return
 
+        path.parent.mkdir(parents=True, exist_ok=True)
         self.annotations, self.animal_names = self.table_store.create_empty(animal_names_if_new)
         self.table_store.save(path, self.annotations, self.animal_names)
 

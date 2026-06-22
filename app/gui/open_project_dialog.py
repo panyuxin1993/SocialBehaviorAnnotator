@@ -35,6 +35,7 @@ class OpenProjectDialog(QDialog):
         self._key_annotation_path = "paths/annotation_path"
         self._key_tracking_dir = "paths/tracking_dir"
         self._key_tracking_path = "paths/tracking_path"
+        self._key_id_images_dir = "paths/id_images_dir"
 
         self._video_edit = QLineEdit()
         self._video_edit.setPlaceholderText("Path to video file…")
@@ -44,6 +45,8 @@ class OpenProjectDialog(QDialog):
         self._ann_edit.setPlaceholderText("Path to annotation table (.csv / .xlsx) or create new…")
         self._tracking_edit = QLineEdit()
         self._tracking_edit.setPlaceholderText("Optional: tracking CSV (e.g. TQT.csv)…")
+        self._id_images_edit = QLineEdit()
+        self._id_images_edit.setPlaceholderText("Optional: folder of ID images (e.g. rat616.jpg)…")
         self._restore_last_paths()
         self._last_video_dir_for_sync = self._path_dir(self._video_edit.text())
 
@@ -61,6 +64,8 @@ class OpenProjectDialog(QDialog):
         btn_ann_new.clicked.connect(self._browse_annotation_new)
         btn_tracking = QPushButton("Browse…")
         btn_tracking.clicked.connect(self._browse_tracking)
+        btn_id_images = QPushButton("Browse…")
+        btn_id_images.clicked.connect(self._browse_id_images)
 
         row_video = QHBoxLayout()
         row_video.addWidget(self._video_edit)
@@ -79,14 +84,21 @@ class OpenProjectDialog(QDialog):
         row_tracking.addWidget(self._tracking_edit)
         row_tracking.addWidget(btn_tracking)
 
+        row_id_images = QHBoxLayout()
+        row_id_images.addWidget(self._id_images_edit)
+        row_id_images.addWidget(btn_id_images)
+
         form = QFormLayout()
         form.addRow("Video:", self._wrap_row(row_video))
         form.addRow("Timestamps:", self._wrap_row(row_ts))
         form.addRow("Annotation table:", self._wrap_row(row_ann))
         form.addRow("Tracking (optional):", self._wrap_row(row_tracking))
+        form.addRow("ID images (optional):", self._wrap_row(row_id_images))
 
         hint = QLabel(
-            "Fill paths manually or use Browse. For a new table, use “Save as new…” or type a path that does not exist yet."
+            "Fill paths manually or use Browse. When you pick a video, timestamp, tracking, and "
+            "annotation paths are suggested automatically. If the annotation file does not exist yet, "
+            "a new table is created on load."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: palette(mid);")
@@ -131,6 +143,17 @@ class OpenProjectDialog(QDialog):
             self._tracking_edit.setText(path)
             self._remember_selected_path(path, self._key_tracking_dir, self._key_tracking_path)
 
+    def _browse_id_images(self) -> None:
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Select ID images folder",
+            self._start_dir(self._id_images_edit.text(), self._key_id_images_dir),
+        )
+        if path:
+            self._id_images_edit.setText(path)
+            self._settings.setValue(self._key_id_images_dir, path)
+            self._settings.setValue(self._key_last_any_dir, path)
+
     def _browse_timestamp(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -170,6 +193,7 @@ class OpenProjectDialog(QDialog):
         self._persist_from_line_edit(self._ts_edit.text(), self._key_timestamp_dir, self._key_timestamp_path)
         self._persist_from_line_edit(self._ann_edit.text(), self._key_annotation_dir, self._key_annotation_path)
         self._persist_from_line_edit(self._tracking_edit.text(), self._key_tracking_dir, self._key_tracking_path)
+        self._persist_from_line_edit(self._id_images_edit.text(), self._key_id_images_dir, self._key_id_images_dir)
         super().accept()
 
     def _restore_last_paths(self) -> None:
@@ -177,6 +201,7 @@ class OpenProjectDialog(QDialog):
         self._ts_edit.setText(str(self._settings.value(self._key_timestamp_path, "")))
         self._ann_edit.setText(str(self._settings.value(self._key_annotation_path, "")))
         self._tracking_edit.setText(str(self._settings.value(self._key_tracking_path, "")))
+        self._id_images_edit.setText(str(self._settings.value(self._key_id_images_dir, "")))
 
     def _start_dir(self, current_text: str, scoped_dir_key: str) -> str:
         text = (current_text or "").strip()
@@ -274,7 +299,47 @@ class OpenProjectDialog(QDialog):
                     str(chosen_tracking), self._key_tracking_dir, self._key_tracking_path
                 )
 
+        ann_text = self._ann_edit.text().strip()
+        ann_dir = self._path_dir(ann_text) if ann_text else None
+        can_override_ann = (not ann_text) or (
+            ann_dir is not None
+            and self._last_video_dir_for_sync is not None
+            and ann_dir == self._last_video_dir_for_sync
+        )
+        if can_override_ann:
+            chosen_ann = self._default_annotation_path(video_dir, stem)
+            self._ann_edit.setText(str(chosen_ann))
+            self._remember_selected_path(str(chosen_ann), self._key_annotation_dir, self._key_annotation_path)
+
+        id_images_text = self._id_images_edit.text().strip()
+        id_images_dir = self._path_dir(id_images_text) if id_images_text else None
+        can_override_id_images = (not id_images_text) or (
+            id_images_dir is not None
+            and self._last_video_dir_for_sync is not None
+            and id_images_dir == self._last_video_dir_for_sync
+        )
+        if can_override_id_images:
+            id_candidates = [
+                video_dir / "id_images",
+                video_dir / "ID_images",
+                video_dir / "id_photos",
+            ]
+            chosen_id = next((c for c in id_candidates if c.is_dir()), None)
+            if chosen_id is not None:
+                self._id_images_edit.setText(str(chosen_id))
+                self._settings.setValue(self._key_id_images_dir, str(chosen_id))
+
         self._last_video_dir_for_sync = video_dir
+
+    @staticmethod
+    def _default_annotation_path(video_dir: Path, stem: str) -> Path:
+        candidates = [
+            video_dir / f"{stem}.xlsx",
+            video_dir / f"{stem}.csv",
+            video_dir / f"{stem}_annotations.xlsx",
+            video_dir / f"{stem}_annotations.csv",
+        ]
+        return next((c for c in candidates if c.exists()), video_dir / f"{stem}.xlsx")
 
     def video_path(self) -> str:
         return self._video_edit.text().strip()
@@ -287,3 +352,6 @@ class OpenProjectDialog(QDialog):
 
     def tracking_path(self) -> str:
         return self._tracking_edit.text().strip()
+
+    def id_images_path(self) -> str:
+        return self._id_images_edit.text().strip()

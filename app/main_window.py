@@ -155,6 +155,7 @@ class MainWindow(QMainWindow):
         timestamp_path = dialog.timestamp_path()
         table_path = dialog.annotation_path()
         tracking_path = dialog.tracking_path()
+        id_images_path = dialog.id_images_path()
 
         if not video_path:
             QMessageBox.warning(self, "Missing video", "Please set the video file path.")
@@ -169,32 +170,37 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid timestamps", f"Timestamp file not found:\n{timestamp_path}")
             return
         if not table_path:
-            QMessageBox.warning(
-                self,
-                "Missing annotation table",
-                "Please set the annotation table path (open existing or Save as new).",
+            table_path = str(
+                OpenProjectDialog._default_annotation_path(Path(video_path).parent, Path(video_path).stem)
             )
-            return
 
         try:
             self.video_service.load_video(video_path)
             self.timestamp_service.load_file(timestamp_path)
+            self._load_or_clear_tracking(tracking_path)
 
             animal_names: list[str] = []
-            if not Path(table_path).exists():
-                text, ok = QInputDialog.getText(
-                    self,
-                    "Animal names",
-                    "Enter comma-separated animal names for a new table:",
-                )
-                if not ok or not text.strip():
-                    raise ValueError("Animal names are required when creating a new table.")
-                animal_names = [name.strip() for name in text.split(",") if name.strip()]
+            table_file = Path(table_path)
+            creating_new_table = not table_file.exists()
+            if creating_new_table:
+                if self.tracking_service.is_loaded and self.tracking_service.subjects:
+                    animal_names = list(self.tracking_service.subjects)
+                else:
+                    text, ok = QInputDialog.getText(
+                        self,
+                        "Animal names",
+                        "Annotation table not found — a new one will be created.\n"
+                        "Enter comma-separated animal names (optional; edit later via Annotation → Animals…):",
+                    )
+                    if ok and text.strip():
+                        animal_names = [name.strip() for name in text.split(",") if name.strip()]
 
             self.annotation_service.load_or_create_table(table_path, animal_names)
-            self._load_or_clear_tracking(tracking_path)
+            if creating_new_table:
+                self.control_panel.append_log(f"Created new annotation table: {table_path}")
             self._sync_tracking_to_control_panel()
             self.control_panel.set_animal_names(self.annotation_service.animal_names)
+            self.control_panel.set_id_images_dir(id_images_path or None)
             self.navigator_panel.ethogram.set_data(
                 self.annotation_service.annotations,
                 0,
@@ -218,6 +224,8 @@ class MainWindow(QMainWindow):
                     f"({self.tracking_service.row_count} rows, "
                     f"{len(self.tracking_service.subjects)} subjects)"
                 )
+            if id_images_path and Path(id_images_path).is_dir():
+                self.control_panel.append_log(f"ID images: {id_images_path}")
         except Exception as exc:
             QMessageBox.critical(self, "Failed to load project", str(exc))
             self.control_panel.append_log(f"ERROR: load failed — {exc}")
@@ -463,7 +471,12 @@ class MainWindow(QMainWindow):
     def _edit_animals(self) -> None:
         """Open a dialog to edit the list of animals used in the project."""
         current_animals = list(self.annotation_service.animal_names)
-        dialog = AnimalListEditor(current_animals, self)
+        default_xlsx_dir = ""
+        if self.annotation_service.table_path is not None:
+            default_xlsx_dir = str(self.annotation_service.table_path.parent)
+        elif self.video_service.video_path is not None:
+            default_xlsx_dir = str(self.video_service.video_path.parent)
+        dialog = AnimalListEditor(current_animals, self, default_xlsx_dir=default_xlsx_dir)
         if dialog.exec() != QDialog.Accepted:
             return
         new_animals = dialog.values()

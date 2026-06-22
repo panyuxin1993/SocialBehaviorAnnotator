@@ -131,3 +131,37 @@ def load_animal_colors_example() -> list[str] | None:
         if hx:
             out.append(hx)
     return out or None
+
+
+_ANIMAL_NAME_HEADER_LABELS = frozenset(
+    {"rat", "name", "animal", "animal_name", "rat_id", "id", "subject", "subject_id"}
+)
+_ANIMAL_NAME_SKIP_LABELS = frozenset({"sum", "total", "mean", "average", "avg"})
+
+
+def parse_animal_names_xlsx(path: Path) -> list[str]:
+    """Read animal names from the first column of the first worksheet."""
+    import pandas as pd
+
+    df = pd.read_excel(path, sheet_name=0)
+    if df.empty:
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for idx, raw in enumerate(df.iloc[:, 0]):
+        if pd.isna(raw):
+            continue
+        text = str(raw).strip()
+        if not text or text.lower() == "nan":
+            continue
+        key = text.lower()
+        if idx == 0 and key in _ANIMAL_NAME_HEADER_LABELS:
+            continue
+        if key in _ANIMAL_NAME_SKIP_LABELS:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+    return out

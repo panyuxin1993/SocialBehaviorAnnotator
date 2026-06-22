@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import numpy as np
-from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
+from PySide6.QtCore import QPoint, Qt, Signal, QTimer
+from PySide6.QtGui import QColor, QFont, QImage, QImageReader, QPainter, QPen, QPixmap, QShowEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTabWidget,
     QTableWidget,
@@ -66,11 +68,20 @@ class ControlPanel(QWidget):
         self._editing_iloc: Optional[int] = None
         self._loaded_event_id: str = ""
         self._tracking_service: TrackingService | None = None
+        self._id_images_dir: Path | None = None
+        self._id_image_index: dict[str, Path] = {}
+        self._id_photo_thumb_height = 96
+        self._id_photo_tile_width = 88
         #: Normalized (0–1) center from the last video click; refreshed on each seek.
         self._zoom_center: Optional[Tuple[float, float]] = None
         self._build_ui()
         self.set_event_type_specs(load_event_type_specs())
         self.kinematics_widget.set_refresh_callback(self._request_kinematics_refresh)
+
+    def showEvent(self, event: QShowEvent) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        if hasattr(self, "id_photos_scroll"):
+            self._update_id_photos_container_geometry()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -130,8 +141,12 @@ class ControlPanel(QWidget):
         zoom_row = QHBoxLayout()
         zoom_row.addWidget(QLabel("Zoom factor"))
         zoom_row.addWidget(self.zoom_factor)
-        zoom_layout.addWidget(self.zoom_label)
-        zoom_layout.addLayout(zoom_row)
+        self.zoom_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        zoom_layout.addWidget(self.zoom_label, stretch=1)
+        zoom_layout.addLayout(zoom_row, stretch=0)
+
+        zoom_layout.addWidget(QLabel("ID photos"), stretch=0)
+        zoom_layout.addWidget(self._build_id_photos_strip(), stretch=0)
 
         self.kinematics_widget = KinematicsWidget()
         self.inspection_tabs.addTab(zoom_page, "Zoom")
@@ -139,10 +154,43 @@ class ControlPanel(QWidget):
         layout.addWidget(self.inspection_tabs)
         return group
 
+    def _build_id_photos_strip(self) -> QScrollArea:
+        row_height = self._id_photo_thumb_height + 44
+        self.id_photos_scroll = QScrollArea()
+        self.id_photos_scroll.setWidgetResizable(False)
+        self.id_photos_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.id_photos_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.id_photos_scroll.setFixedHeight(row_height)
+        self.id_photos_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.id_photos_container = QWidget()
+        self.id_photos_container.setMinimumHeight(row_height - 8)
+        self.id_photos_row = QHBoxLayout(self.id_photos_container)
+        self.id_photos_row.setContentsMargins(4, 4, 4, 4)
+        self.id_photos_row.setSpacing(10)
+        self.id_photos_row.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.id_photos_scroll.setWidget(self.id_photos_container)
+        return self.id_photos_scroll
+
     def set_tracking_service(self, tracking: TrackingService | None) -> None:
         self._tracking_service = tracking if tracking is not None and tracking.is_loaded else None
         self.kinematics_widget.set_tracking(self._tracking_service)
         self._refresh_zoom_preview()
+
+    def set_id_images_dir(self, path: str | Path | None) -> None:
+        if path is None or not str(path).strip():
+            self._id_images_dir = None
+            self._id_image_index = {}
+        else:
+            p = Path(path).expanduser()
+            if p.is_dir():
+                self._id_images_dir = p
+                self._id_image_index = self._build_id_image_index(p)
+            else:
+                self._id_images_dir = None
+                self._id_image_index = {}
+                self.append_log(f"ID images folder not found: {p}")
+        self._schedule_id_demo_refresh()
 
     def _request_kinematics_refresh(self) -> None:
         self.kinematics_refresh_requested.emit()
@@ -342,7 +390,8 @@ class ControlPanel(QWidget):
         self.name_table.verticalHeader().setVisible(False)
         self.name_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.name_table.setFocusPolicy(Qt.NoFocus)
-        self.name_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.name_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.name_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.name_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.name_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.name_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
@@ -421,7 +470,190 @@ class ControlPanel(QWidget):
         self.name_table.setFixedWidth(max(60, fitted_width))
         self.name_table.blockSignals(False)
         self.roles_table.blockSignals(False)
+        self._select_default_animal_row()
+        self._schedule_id_demo_refresh()
         self._emit_kinematics_refresh()
+
+    def _schedule_id_demo_refresh(self) -> None:
+        QTimer.singleShot(0, self._refresh_id_demo)
+
+    def _select_default_animal_row(self) -> None:
+        if not self.animal_names:
+            return
+        for role in ("initiator", "victim"):
+            row = self._row_for_animal_with_role(role)
+            if row is not None:
+                self.name_table.selectRow(row)
+                return
+        self.name_table.selectRow(0)
+
+    def _row_for_animal_with_role(self, role: str) -> int | None:
+        col = ROLE_TO_COLUMN.get(role)
+        if col is None:
+            return None
+        for row in range(self.roles_table.rowCount()):
+            item = self.roles_table.item(row, col)
+            if item is not None and item.checkState() == Qt.Checked:
+                return row
+        return None
+
+    @staticmethod
+    def _id_image_lookup_keys(animal_name: str) -> list[str]:
+        base = (animal_name or "").strip()
+        if not base:
+            return []
+        keys = [base]
+        lowered = base.lower()
+        for suffix in ("_center", "_area", "_perimeter"):
+            if lowered.endswith(suffix):
+                keys.append(base[: -len(suffix)])
+        return list(dict.fromkeys(keys))
+
+    @staticmethod
+    def _build_id_image_index(directory: Path) -> dict[str, Path]:
+        index: dict[str, Path] = {}
+        allowed = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
+            return index
+        for path in entries:
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in allowed:
+                continue
+            index[path.stem.casefold()] = path
+        return index
+
+    def _find_id_image(self, animal_name: str) -> Path | None:
+        if not self._id_image_index:
+            return None
+        for key in self._id_image_lookup_keys(animal_name):
+            hit = self._id_image_index.get(key.casefold())
+            if hit is not None:
+                return hit
+        base = self._id_image_lookup_keys(animal_name)[0].casefold()
+        for stem, path in self._id_image_index.items():
+            if stem == base or stem in base or base in stem:
+                return path
+        return None
+
+    @staticmethod
+    def _load_id_pixmap(image_path: Path, thumb_height: int) -> QPixmap | None:
+        reader = QImageReader(str(image_path))
+        reader.setAutoTransform(True)
+        image = reader.read()
+        if image.isNull():
+            return None
+        pix = QPixmap.fromImage(image)
+        if pix.isNull():
+            return None
+        return pix.scaledToHeight(thumb_height, Qt.TransformationMode.SmoothTransformation)
+
+    def _clear_id_photos_row(self) -> None:
+        while self.id_photos_row.count():
+            item = self.id_photos_row.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _make_id_photo_tile(self, name: str, row: int) -> QWidget:
+        tile = QWidget()
+        tile.setFixedWidth(self._id_photo_tile_width)
+        col = QVBoxLayout(tile)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(4)
+
+        image_label = QLabel()
+        image_label.setFixedSize(self._id_photo_tile_width, self._id_photo_thumb_height)
+        image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        image_label.setStyleSheet("border: 1px solid palette(mid); border-radius: 4px;")
+
+        name_label = QLabel(name)
+        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_label.setWordWrap(True)
+        name_label.setFixedWidth(self._id_photo_tile_width)
+        color = QColor(ANIMAL_COLORS[row % len(ANIMAL_COLORS)])
+        name_label.setStyleSheet(
+            f"background-color: {color.name()}; color: #202020; padding: 2px 4px; border-radius: 3px;"
+        )
+
+        if self._id_images_dir is None:
+            image_label.setText("No folder")
+        else:
+            image_path = self._find_id_image(name)
+            if image_path is None:
+                image_label.setText("No image")
+            else:
+                scaled = self._load_id_pixmap(image_path, self._id_photo_thumb_height)
+                if scaled is None:
+                    detail = QImageReader(str(image_path)).errorString()
+                    image_label.setText("Load error")
+                    image_label.setToolTip(f"{image_path.name}: {detail}")
+                else:
+                    image_label.setPixmap(scaled)
+                    image_label.setToolTip(str(image_path))
+
+        col.addWidget(image_label)
+        col.addWidget(name_label)
+        return tile
+
+    def _update_id_photos_container_geometry(self) -> None:
+        row_height = self._id_photo_thumb_height + 44
+        self.id_photos_container.setMinimumHeight(row_height - 8)
+        total_width = 8
+        for index in range(self.id_photos_row.count()):
+            item = self.id_photos_row.itemAt(index)
+            if item is None:
+                continue
+            widget = item.widget()
+            if widget is not None:
+                total_width += widget.sizeHint().width() or self._id_photo_tile_width
+        if self.id_photos_row.count() > 1:
+            total_width += self.id_photos_row.spacing() * (self.id_photos_row.count() - 1)
+        viewport_width = self.id_photos_scroll.viewport().width()
+        self.id_photos_container.setMinimumWidth(max(total_width, viewport_width))
+        self.id_photos_container.adjustSize()
+        self.id_photos_scroll.updateGeometry()
+
+    def _refresh_id_demo(self) -> None:
+        self._clear_id_photos_row()
+
+        if not self.animal_names:
+            placeholder = QLabel("No animals loaded")
+            placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            placeholder.setMinimumWidth(self.id_photos_scroll.viewport().width())
+            self.id_photos_row.addWidget(placeholder)
+            self._update_id_photos_container_geometry()
+            return
+
+        loaded = 0
+        missing: list[str] = []
+        for row, name in enumerate(self.animal_names):
+            tile = self._make_id_photo_tile(name, row)
+            self.id_photos_row.addWidget(tile)
+            if self._id_images_dir is not None:
+                if self._find_id_image(name) is not None:
+                    loaded += 1
+                else:
+                    missing.append(name)
+
+        self._update_id_photos_container_geometry()
+
+        if self._id_images_dir is None:
+            self.append_log("ID photos: no folder set (File → Open project inputs)")
+            return
+
+        msg = (
+            f"ID photos: {loaded}/{len(self.animal_names)} matched in "
+            f"{self._id_images_dir} ({len(self._id_image_index)} image files)"
+        )
+        if loaded == 0 and missing:
+            sample = ", ".join(missing[:4])
+            if len(missing) > 4:
+                sample += ", …"
+            msg += f"; no file for: {sample}"
+        self.append_log(msg)
 
     def _on_role_item_changed(self, item: QTableWidgetItem) -> None:
         role = self.roles_table.horizontalHeaderItem(item.column()).text()
@@ -440,6 +672,7 @@ class ControlPanel(QWidget):
 
         if item.checkState() == Qt.Checked:
             self.pending_role_capture = (item.row(), role)
+            self.name_table.selectRow(item.row())
             self.zoom_label.setText(f"Click video to place {role} for {self.animal_names[item.row()]}")
         if role in ("initiator", "victim"):
             self._emit_kinematics_refresh()
@@ -877,5 +1110,6 @@ class ControlPanel(QWidget):
         if payload is not None:
             self._apply_role_points_payload(payload)
 
+        self._select_default_animal_row()
         self._emit_kinematics_refresh()
 
