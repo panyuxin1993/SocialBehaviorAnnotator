@@ -170,9 +170,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid timestamps", f"Timestamp file not found:\n{timestamp_path}")
             return
         if not table_path:
-            table_path = str(
-                OpenProjectDialog._default_annotation_path(Path(video_path).parent, Path(video_path).stem)
-            )
+            table_path = str(OpenProjectDialog._default_annotation_path(Path(video_path).parent))
 
         try:
             self.video_service.load_video(video_path)

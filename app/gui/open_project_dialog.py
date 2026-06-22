@@ -307,7 +307,7 @@ class OpenProjectDialog(QDialog):
             and ann_dir == self._last_video_dir_for_sync
         )
         if can_override_ann:
-            chosen_ann = self._default_annotation_path(video_dir, stem)
+            chosen_ann = self._default_annotation_path(video_dir)
             self._ann_edit.setText(str(chosen_ann))
             self._remember_selected_path(str(chosen_ann), self._key_annotation_dir, self._key_annotation_path)
 
@@ -332,14 +332,8 @@ class OpenProjectDialog(QDialog):
         self._last_video_dir_for_sync = video_dir
 
     @staticmethod
-    def _default_annotation_path(video_dir: Path, stem: str) -> Path:
-        candidates = [
-            video_dir / f"{stem}.xlsx",
-            video_dir / f"{stem}.csv",
-            video_dir / f"{stem}_annotations.xlsx",
-            video_dir / f"{stem}_annotations.csv",
-        ]
-        return next((c for c in candidates if c.exists()), video_dir / f"{stem}.xlsx")
+    def _default_annotation_path(video_dir: Path) -> Path:
+        return video_dir / "behavior_event_df.csv"
 
     def video_path(self) -> str:
         return self._video_edit.text().strip()
