@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 from app.models.event import AnimalRoleSelection, EventRecord
 from app.models.schema import ROLE_COLUMNS
 from app.color_utils import fallback_event_type_hex, parse_event_color_hex
-from app.config_loader import load_event_type_specs
+from app.config_loader import EventTypeSpec, environmental_type_keys, load_event_type_specs
 from app.gui.colors import ANIMAL_COLORS
 from app.gui.kinematics_widget import KinematicsWidget
 from app.services.annotation_service import annotation_datetime_to_unix
@@ -63,8 +63,9 @@ class ControlPanel(QWidget):
         self.end_datetime: Optional[datetime] = None
         self.start_unix: Optional[float] = None
         self.end_unix: Optional[float] = None
-        #: Rows ``(abbr, type, #RRGGBB)`` aligned with ``event_type_combo`` items (in order).
-        self._event_type_specs: list[tuple[str, str, str]] = []
+        #: Rows ``(abbr, type, #RRGGBB, environmental)`` aligned with ``event_type_combo`` items.
+        self._event_type_specs: list[EventTypeSpec] = []
+        self._roles_table_group: QGroupBox | None = None
         self._editing_iloc: Optional[int] = None
         self._loaded_event_id: str = ""
         self._tracking_service: TrackingService | None = None
@@ -269,6 +270,7 @@ class ControlPanel(QWidget):
         self.event_type_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self.event_type_combo.view().setMinimumWidth(280)
         self.event_type_combo.currentTextChanged.connect(self._emit_kinematics_refresh)
+        self.event_type_combo.currentTextChanged.connect(self._update_role_table_hint)
         layout.addRow("Event type", self.event_type_combo)
 
         self.start_time_edit = QLineEdit()
@@ -298,15 +300,18 @@ class ControlPanel(QWidget):
             t = self.event_type_combo.itemText(i).strip()
             if not t:
                 continue
-            self._event_type_specs.append(("", t, fallback_event_type_hex(t)))
+            self._event_type_specs.append(("", t, fallback_event_type_hex(t), False))
 
-    def event_type_specs(self) -> list[tuple[str, str, str]]:
+    def event_type_specs(self) -> list[EventTypeSpec]:
         return list(self._event_type_specs)
+
+    def environmental_type_keys(self) -> set[str]:
+        return environmental_type_keys(self._event_type_specs)
 
     def event_type_color_map(self) -> dict[str, str]:
         """Keys: full ``type`` and non-empty ``abbr`` (lowercase) — annotation ``type`` may store either."""
         m: dict[str, str] = {}
-        for abbr, t, hx in self._event_type_specs:
+        for abbr, t, hx, _environmental in self._event_type_specs:
             m[t.lower()] = hx
             a = (abbr or "").strip()
             if a:
@@ -316,7 +321,7 @@ class ControlPanel(QWidget):
     def event_type_legend_label_map(self) -> dict[str, str]:
         """Map stored ``type`` cell token → preferred legend text (full type name)."""
         m: dict[str, str] = {}
-        for abbr, t, _hx in self._event_type_specs:
+        for abbr, t, _hx, _environmental in self._event_type_specs:
             m[t.lower()] = t
             a = (abbr or "").strip()
             if a:
@@ -329,7 +334,7 @@ class ControlPanel(QWidget):
         if not s:
             return ""
         sl = s.lower()
-        for abbr, full, _hx in self._event_type_specs:
+        for abbr, full, _hx, _environmental in self._event_type_specs:
             if sl == full.lower():
                 return full
             if abbr and sl == abbr.strip().lower():
@@ -342,12 +347,30 @@ class ControlPanel(QWidget):
         if not s:
             return ""
         sl = s.lower()
-        for abbr, full, _hx in self._event_type_specs:
+        for abbr, full, _hx, _environmental in self._event_type_specs:
             if sl == full.lower():
                 return abbr.strip() if (abbr or "").strip() else full
             if abbr and sl == abbr.strip().lower():
                 return abbr.strip()
         return s
+
+    def _current_event_type_environmental(self) -> bool:
+        display_type = self.event_type_combo.currentText().strip()
+        if not display_type:
+            return False
+        sl = display_type.casefold()
+        for abbr, full, _hx, environmental in self._event_type_specs:
+            if sl == full.casefold() or (abbr and sl == abbr.strip().casefold()):
+                return environmental
+        return False
+
+    def _update_role_table_hint(self, _text: str = "") -> None:
+        if self._roles_table_group is None:
+            return
+        if self._current_event_type_environmental():
+            self._roles_table_group.setTitle("Animal roles (optional — environmental event)")
+        else:
+            self._roles_table_group.setTitle("Animal roles")
 
     def _event_type_combo_index(self, label: str) -> int:
         target = label.strip().casefold()
@@ -356,10 +379,15 @@ class ControlPanel(QWidget):
                 return i
         return -1
 
-    def set_event_type_specs(self, specs: list[tuple[str, str, str]]) -> None:
-        cleaned: list[tuple[str, str, str]] = []
+    def set_event_type_specs(self, specs: list[EventTypeSpec]) -> None:
+        cleaned: list[EventTypeSpec] = []
         seen: set[str] = set()
-        for abbr, t, c in specs:
+        for spec in specs:
+            if len(spec) == 3:
+                abbr, t, c = spec  # type: ignore[misc]
+                environmental = False
+            else:
+                abbr, t, c, environmental = spec
             t = (t or "").strip()
             if not t or t.lower() == "nan":
                 continue
@@ -370,18 +398,20 @@ class ControlPanel(QWidget):
             hx = parse_event_color_hex(str(c)) if c else None
             if not hx:
                 hx = fallback_event_type_hex(t)
-            cleaned.append((abbr.strip() if abbr else "", t, hx))
+            cleaned.append((abbr.strip() if abbr else "", t, hx, bool(environmental)))
         if not cleaned:
             return
         self._event_type_specs = cleaned
         self.event_type_combo.blockSignals(True)
         self.event_type_combo.clear()
-        for _abbr, type_name, _hx in cleaned:
+        for _abbr, type_name, _hx, _environmental in cleaned:
             self.event_type_combo.addItem(type_name)
         self.event_type_combo.blockSignals(False)
+        self._update_role_table_hint()
 
     def _build_role_table_group(self) -> QGroupBox:
         group = QGroupBox("Animal roles")
+        self._roles_table_group = group
         layout = QHBoxLayout(group)
 
         # Frozen first column: separate table for names (always visible).
@@ -641,7 +671,7 @@ class ControlPanel(QWidget):
         self._update_id_photos_container_geometry()
 
         if self._id_images_dir is None:
-            self.append_log("ID photos: no folder set (File → Open project inputs)")
+            self.append_log("ID photos: no folder set (Annotation → Animals…)")
             return
 
         msg = (
@@ -888,8 +918,8 @@ class ControlPanel(QWidget):
                 selection.role_points[role] = item.data(Qt.UserRole)
             animals.append(selection)
 
-        if initiator_count < 1:
-            raise ValueError("At least one initiator must be selected.")
+        if initiator_count < 1 and not self._current_event_type_environmental():
+            raise ValueError("At least one initiator must be selected for this event type.")
 
         return EventRecord(
             event_id=event_id,
@@ -1074,9 +1104,10 @@ class ControlPanel(QWidget):
             idx = self._event_type_combo_index(combo_label)
             if idx < 0:
                 self.event_type_combo.addItem(combo_label)
-                self._event_type_specs.append(("", event_type, fallback_event_type_hex(event_type)))
+                self._event_type_specs.append(("", event_type, fallback_event_type_hex(event_type), False))
                 idx = self._event_type_combo_index(combo_label)
             self.event_type_combo.setCurrentIndex(idx)
+        self._update_role_table_hint()
         self.notes_edit.setText(str(event.get("other_notes", "")))
 
         self._apply_role_columns_from_event(event)

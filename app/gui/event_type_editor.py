@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -14,43 +15,52 @@ from PySide6.QtWidgets import (
 )
 
 from app.color_utils import fallback_event_type_hex, parse_event_color_hex
-from app.config_loader import example_event_types_csv_path, parse_event_types_csv, repo_config_dir
+from app.config_loader import EventTypeSpec, example_event_types_csv_path, parse_event_types_csv, repo_config_dir
 
 
 class EventTypeEditor(QDialog):
-    """Dialog to edit event types: ``abbr``, ``type``, and ``color`` (CSV import/export)."""
+    """Dialog to edit event types: ``abbr``, ``type``, ``color``, and ``environmental`` (CSV import/export)."""
 
     def __init__(
         self,
-        values: list[tuple[str, str, str]],
+        values: list[EventTypeSpec],
         parent=None,
         default_csv_dir: str = "",
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Edit event types")
-        self.resize(640, 380)
+        self.resize(720, 380)
         self.default_csv_dir = default_csv_dir
 
         layout = QVBoxLayout(self)
 
         self.table = QTableWidget(self)
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["abbr", "type", "color"])
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["abbr", "type", "color", "environmental"])
         self.table.verticalHeader().setVisible(False)
         n = max(1, len(values))
         self.table.setRowCount(n)
-        for row, triple in enumerate(values):
-            abbr, type_name, color = triple
+        for row, spec in enumerate(values):
+            if len(spec) == 3:
+                abbr, type_name, color = spec  # type: ignore[misc]
+                environmental = False
+            else:
+                abbr, type_name, color, environmental = spec
             if row >= self.table.rowCount():
                 self.table.insertRow(row)
             self.table.setItem(row, 0, QTableWidgetItem(abbr))
             self.table.setItem(row, 1, QTableWidgetItem(type_name))
             self.table.setItem(row, 2, QTableWidgetItem(color))
+            env_item = QTableWidgetItem()
+            env_item.setFlags(env_item.flags() | Qt.ItemIsUserCheckable)
+            env_item.setCheckState(Qt.Checked if environmental else Qt.Unchecked)
+            self.table.setItem(row, 3, env_item)
         layout.addWidget(self.table)
 
         hint = QLabel(
-            "Each row: shorthand abbr, full type name, and color (#hex or Qt color name). "
-            "Empty color uses the built-in default for that type. Colors drive the ethogram."
+            "Each row: shorthand abbr, full type name, color (#hex or Qt color name), and whether the "
+            "event is environmental (no initiator required; ethogram patch spans all animals). "
+            "Empty color uses the built-in default for that type."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -82,13 +92,18 @@ class EventTypeEditor(QDialog):
     def _add_row(self) -> None:
         row = self.table.rowCount()
         self.table.insertRow(row)
+        env_item = QTableWidgetItem()
+        env_item.setFlags(env_item.flags() | Qt.ItemIsUserCheckable)
+        env_item.setCheckState(Qt.Unchecked)
+        self.table.setItem(row, 3, env_item)
 
-    def value_triples(self) -> list[tuple[str, str, str]]:
-        out: list[tuple[str, str, str]] = []
+    def value_triples(self) -> list[EventTypeSpec]:
+        out: list[EventTypeSpec] = []
         for row in range(self.table.rowCount()):
             abbr_item = self.table.item(row, 0)
             type_item = self.table.item(row, 1)
             color_item = self.table.item(row, 2)
+            env_item = self.table.item(row, 3)
             type_text = (type_item.text().strip() if type_item else "")
             if not type_text:
                 continue
@@ -96,25 +111,35 @@ class EventTypeEditor(QDialog):
             raw_color = (color_item.text().strip() if color_item else "")
             parsed = parse_event_color_hex(raw_color)
             color_hex = parsed if parsed else fallback_event_type_hex(type_text)
-            out.append((abbr_text, type_text, color_hex))
+            environmental = env_item is not None and env_item.checkState() == Qt.Checked
+            out.append((abbr_text, type_text, color_hex, environmental))
         seen: set[str] = set()
-        unique: list[tuple[str, str, str]] = []
-        for triple in out:
-            key = triple[1].lower()
+        unique: list[EventTypeSpec] = []
+        for spec in out:
+            key = spec[1].lower()
             if key in seen:
                 continue
             seen.add(key)
-            unique.append(triple)
+            unique.append(spec)
         return unique
 
-    def _fill_table_from_specs(self, triples: list[tuple[str, str, str]]) -> None:
+    def _fill_table_from_specs(self, specs: list[EventTypeSpec]) -> None:
         self.table.setRowCount(0)
-        for abbr, type_name, color_hex in triples:
+        for spec in specs:
+            if len(spec) == 3:
+                abbr, type_name, color_hex = spec  # type: ignore[misc]
+                environmental = False
+            else:
+                abbr, type_name, color_hex, environmental = spec
             row = self.table.rowCount()
             self.table.insertRow(row)
             self.table.setItem(row, 0, QTableWidgetItem(abbr))
             self.table.setItem(row, 1, QTableWidgetItem(type_name))
             self.table.setItem(row, 2, QTableWidgetItem(color_hex))
+            env_item = QTableWidgetItem()
+            env_item.setFlags(env_item.flags() | Qt.ItemIsUserCheckable)
+            env_item.setCheckState(Qt.Checked if environmental else Qt.Unchecked)
+            self.table.setItem(row, 3, env_item)
 
     def _load_shipped_defaults(self) -> None:
         path = example_event_types_csv_path()
@@ -123,9 +148,9 @@ class EventTypeEditor(QDialog):
         if not path.is_file():
             return
         try:
-            triples = parse_event_types_csv(path)
-            if triples:
-                self._fill_table_from_specs(triples)
+            specs = parse_event_types_csv(path)
+            if specs:
+                self._fill_table_from_specs(specs)
         except OSError:
             return
 
@@ -140,9 +165,9 @@ class EventTypeEditor(QDialog):
         if not path:
             return
         try:
-            triples = parse_event_types_csv(Path(path))
-            if triples:
-                self._fill_table_from_specs(triples)
+            specs = parse_event_types_csv(Path(path))
+            if specs:
+                self._fill_table_from_specs(specs)
         except OSError:
             return
 
@@ -160,11 +185,11 @@ class EventTypeEditor(QDialog):
 
             if not path.lower().endswith(".csv"):
                 path = path + ".csv"
-            triples = self.value_triples()
+            specs = self.value_triples()
             with open(path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow(["abbr", "type", "color"])
-                for abbr, type_name, color_hex in triples:
-                    writer.writerow([abbr, type_name, color_hex])
+                writer.writerow(["abbr", "type", "color", "environmental"])
+                for abbr, type_name, color_hex, environmental in specs:
+                    writer.writerow([abbr, type_name, color_hex, "yes" if environmental else ""])
         except Exception:
             return

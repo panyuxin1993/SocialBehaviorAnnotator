@@ -24,7 +24,7 @@ ANNOTATION_COLUMNS = [
     "other_notes",
 ]
 
-METADATA_COLUMNS = ["animal_names"]
+METADATA_COLUMNS = ["animal_names", "id_images_dir"]
 
 
 @dataclass(frozen=True)

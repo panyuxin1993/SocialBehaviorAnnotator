@@ -46,6 +46,8 @@ class EthogramWidget(QWidget):
         self._type_color_overrides: dict[str, str] = {}
         #: Lowercased stored ``type`` cell (often abbr) → legend label (usually full type name).
         self._type_legend_labels: dict[str, str] = {}
+        #: Lowercased ``type`` / ``abbr`` tokens for environmental (stimulus) events.
+        self._environmental_types: set[str] = set()
 
     @staticmethod
     def _color_hex(c: QColor) -> str:
@@ -102,6 +104,7 @@ class EthogramWidget(QWidget):
         fps: float | None = None,
         type_colors: dict[str, str] | None = None,
         type_legend_labels: dict[str, str] | None = None,
+        environmental_types: set[str] | None = None,
     ) -> None:
         # Annotation / video metadata changed — drop cached bitmap (expensive rebuild once).
         self._timeline_cache = None
@@ -122,6 +125,8 @@ class EthogramWidget(QWidget):
             }
         else:
             self._type_legend_labels = {}
+        if environmental_types is not None:
+            self.set_environmental_types(environmental_types)
         n_lanes = max(1, len(self.animal_names))
         self.setMinimumHeight(max(90, min(22 * n_lanes + 24, 400)))
         self._emit_legend_items()
@@ -182,6 +187,13 @@ class EthogramWidget(QWidget):
         if not s or s.lower() == "nan":
             return set()
         return {p.strip() for p in s.split(",") if p.strip()}
+
+    def set_environmental_types(self, keys: set[str] | None) -> None:
+        self._environmental_types = {str(k).strip().lower() for k in (keys or set()) if str(k).strip()}
+
+    def _is_environmental_event(self, row) -> bool:
+        """Arena-wide stimulus events have no initiator and span all ethogram lanes."""
+        return not self._names_in_cell(row.get("initiator", ""))
 
     def _color_for_event_type(self, event_type: str) -> QColor:
         key = event_type.strip().lower()
@@ -364,6 +376,21 @@ class EthogramWidget(QWidget):
                     initiators = self._names_in_cell(row.get("initiator", ""))
                     victims = self._names_in_cell(row.get("victim", ""))
 
+                    xa = self._frame_to_cache_x(start_f, cache_w, last_f)
+                    xb = self._frame_to_cache_x(end_f, cache_w, last_f) + 1
+                    if xb <= xa:
+                        xb = min(cache_w - 1, xa + 1)
+                    patch_w = max(2, xb - xa)
+
+                    if self._is_environmental_event(row):
+                        y0 = 2
+                        y1 = cache_h - 2
+                        rh = max(1, y1 - y0)
+                        c = QColor(base_color)
+                        c.setAlpha(210)
+                        p.fillRect(xa, y0, patch_w, rh, c)
+                        continue
+
                     if animals:
                         for lane, name in enumerate(animals):
                             y0 = int(2 + lane * lane_h)
@@ -373,18 +400,14 @@ class EthogramWidget(QWidget):
                             draw_vict = name in victims
                             if not draw_init and not draw_vict:
                                 continue
-                            xa = self._frame_to_cache_x(start_f, cache_w, last_f)
-                            xb = self._frame_to_cache_x(end_f, cache_w, last_f) + 1
-                            if xb <= xa:
-                                xb = min(cache_w - 1, xa + 1)
                             if draw_init:
                                 c = QColor(base_color)
                                 c.setAlpha(255)
-                                p.fillRect(xa, y0, max(2, xb - xa), rh, c)
+                                p.fillRect(xa, y0, patch_w, rh, c)
                             if draw_vict:
                                 c = QColor(base_color)
                                 c.setAlpha(128)
-                                p.fillRect(xa, y0, max(2, xb - xa), rh, c)
+                                p.fillRect(xa, y0, patch_w, rh, c)
                     else:
                         y0 = 2
                         y1 = cache_h - 2

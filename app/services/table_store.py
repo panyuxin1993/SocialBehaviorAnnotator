@@ -20,14 +20,14 @@ class TableStore:
     def __init__(self) -> None:
         self.schema = AnnotationSchema()
 
-    def load(self, table_path: str | Path) -> tuple[pd.DataFrame, list[str]]:
+    def load(self, table_path: str | Path) -> tuple[pd.DataFrame, list[str], str]:
         path = Path(table_path)
         suffix = path.suffix.lower()
 
         if suffix == ".csv":
             df = pd.read_csv(path)
             names = self._infer_animal_names(df)
-            return self._normalize(df), names
+            return self._normalize(df), names, ""
 
         if suffix in {".xlsx", ".xls"}:
             return self._load_xlsx(path)
@@ -38,7 +38,13 @@ class TableStore:
         df = pd.DataFrame(columns=ANNOTATION_COLUMNS)
         return df, animal_names
 
-    def save(self, table_path: str | Path, annotations: pd.DataFrame, animal_names: list[str]) -> None:
+    def save(
+        self,
+        table_path: str | Path,
+        annotations: pd.DataFrame,
+        animal_names: list[str],
+        id_images_dir: str = "",
+    ) -> None:
         path = Path(table_path)
         suffix = path.suffix.lower()
         annotations = self._normalize(annotations)
@@ -48,14 +54,14 @@ class TableStore:
             return
 
         if suffix in {".xlsx", ".xls"}:
-            self._save_xlsx(path, annotations, animal_names)
+            self._save_xlsx(path, annotations, animal_names, id_images_dir)
             return
 
         raise ValueError(f"Unsupported table extension: {suffix}")
 
-    def _load_xlsx(self, path: Path) -> tuple[pd.DataFrame, list[str]]:
+    def _load_xlsx(self, path: Path) -> tuple[pd.DataFrame, list[str], str]:
         xls = pd.ExcelFile(path)
-        names = self._animal_names_from_metadata(xls)
+        names, id_images_dir = self._metadata_from_sheet(xls)
         sheets_to_load = self._sheets_to_load(xls)
 
         frames: list[pd.DataFrame] = []
@@ -75,7 +81,7 @@ class TableStore:
 
         if not names:
             names = self._infer_animal_names(df)
-        return df, names
+        return df, names, id_images_dir
 
     def _sheets_to_load(self, xls: pd.ExcelFile) -> list[str]:
         """Choose workbook tabs to merge: all date-named and/or annotation data sheets."""
@@ -109,8 +115,17 @@ class TableStore:
         columns = {str(col).strip().lower() for col in header.columns}
         return len(columns & _ANNOTATION_HEADER_MARKERS) >= 2
 
-    def _save_xlsx(self, path: Path, annotations: pd.DataFrame, animal_names: list[str]) -> None:
-        metadata = pd.DataFrame([{"animal_names": ",".join(animal_names)}], columns=METADATA_COLUMNS)
+    def _save_xlsx(
+        self,
+        path: Path,
+        annotations: pd.DataFrame,
+        animal_names: list[str],
+        id_images_dir: str = "",
+    ) -> None:
+        metadata = pd.DataFrame(
+            [{"animal_names": ",".join(animal_names), "id_images_dir": (id_images_dir or "").strip()}],
+            columns=METADATA_COLUMNS,
+        )
         buckets = self._split_by_date(annotations)
 
         with pd.ExcelWriter(path, engine="openpyxl") as writer:
@@ -127,14 +142,25 @@ class TableStore:
                     chunk.to_excel(writer, sheet_name=sheet_name, index=False)
             metadata.to_excel(writer, sheet_name=self.schema.metadata_sheet_name, index=False)
 
-    def _animal_names_from_metadata(self, xls: pd.ExcelFile) -> list[str]:
+    def _metadata_from_sheet(self, xls: pd.ExcelFile) -> tuple[list[str], str]:
         if self.schema.metadata_sheet_name not in xls.sheet_names:
-            return []
+            return [], ""
         metadata = xls.parse(self.schema.metadata_sheet_name)
-        if "animal_names" in metadata.columns and not metadata.empty:
-            raw = str(metadata.loc[0, "animal_names"])
-            return [value.strip() for value in raw.split(",") if value.strip()]
-        return []
+        names: list[str] = []
+        id_images_dir = ""
+        if not metadata.empty:
+            if "animal_names" in metadata.columns:
+                raw = str(metadata.loc[0, "animal_names"])
+                names = [value.strip() for value in raw.split(",") if value.strip()]
+            if "id_images_dir" in metadata.columns:
+                raw_dir = metadata.loc[0, "id_images_dir"]
+                if raw_dir is not None and str(raw_dir).strip().lower() not in ("", "nan", "none"):
+                    id_images_dir = str(raw_dir).strip()
+        return names, id_images_dir
+
+    def _animal_names_from_metadata(self, xls: pd.ExcelFile) -> list[str]:
+        names, _id_images_dir = self._metadata_from_sheet(xls)
+        return names
 
     def _is_date_sheet_name(self, name: str) -> bool:
         if name in {self.schema.annotation_sheet_name, self.schema.metadata_sheet_name}:

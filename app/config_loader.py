@@ -9,12 +9,15 @@ from app.color_utils import parse_event_color_hex
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = _REPO_ROOT / "config"
 
-_BUILTIN_EVENT_TYPE_SPECS: list[tuple[str, str, str]] = [
-    ("FT", "fight", "#E53935"),
-    ("CH", "chase", "#FB8C00"),
-    ("PU", "push", "#1E88E5"),
-    ("DF", "defend", "#43A047"),
-    ("RB", "rob", "#6D4C41"),
+# (abbr, type, color, environmental)
+EventTypeSpec = tuple[str, str, str, bool]
+
+_BUILTIN_EVENT_TYPE_SPECS: list[EventTypeSpec] = [
+    ("FT", "fight", "#E53935", False),
+    ("CH", "chase", "#FB8C00", False),
+    ("PU", "push", "#1E88E5", False),
+    ("DF", "defend", "#43A047", False),
+    ("RB", "rob", "#6D4C41", False),
 ]
 
 # Extra lookup keys for ethogram fallbacks (synonyms not listed as separate CSV rows).
@@ -30,7 +33,7 @@ _cached_type_colors: dict[str, str] | None = None
 
 def _builtin_hex_for_type(type_name: str) -> str:
     key = type_name.strip().lower()
-    for _abbr, t, hx in _BUILTIN_EVENT_TYPE_SPECS:
+    for _abbr, t, hx, _environmental in _BUILTIN_EVENT_TYPE_SPECS:
         if t.lower() == key:
             return hx
     return "#78909C"
@@ -49,8 +52,12 @@ def example_event_types_csv_path() -> Path:
     return CONFIG_DIR / "event_types.example.csv"
 
 
-def parse_event_types_csv(path: Path) -> list[tuple[str, str, str]]:
-    """Parse ``abbr,type,color`` rows from a CSV file."""
+def _parse_environmental_cell(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "y", "env", "environmental"}
+
+
+def parse_event_types_csv(path: Path) -> list[EventTypeSpec]:
+    """Parse ``abbr,type,color[,environmental]`` rows from a CSV file."""
     with path.open(newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
         rows = list(reader)
@@ -62,8 +69,9 @@ def parse_event_types_csv(path: Path) -> list[tuple[str, str, str]]:
     abbr_idx = headers.index("abbr") if "abbr" in headers else 0
     type_idx = headers.index("type") if "type" in headers else min(1, len(headers) - 1)
     color_idx = headers.index("color") if "color" in headers else None
+    env_idx = headers.index("environmental") if "environmental" in headers else None
 
-    out: list[tuple[str, str, str]] = []
+    out: list[EventTypeSpec] = []
     seen: set[str] = set()
     for raw in data_rows:
         if not raw:
@@ -81,11 +89,14 @@ def parse_event_types_csv(path: Path) -> list[tuple[str, str, str]]:
             color_cell = raw[color_idx].strip()
         parsed = parse_event_color_hex(color_cell)
         color_hex = parsed if parsed else _builtin_hex_for_type(type_name)
-        out.append((abbr, type_name, color_hex))
+        environmental = False
+        if env_idx is not None and env_idx < len(raw):
+            environmental = _parse_environmental_cell(raw[env_idx])
+        out.append((abbr, type_name, color_hex, environmental))
     return out
 
 
-def load_event_type_specs(path: Path | None = None) -> list[tuple[str, str, str]]:
+def load_event_type_specs(path: Path | None = None) -> list[EventTypeSpec]:
     """Load ``(abbr, type, #RRGGBB)`` from *path* or ``config/event_types.csv``."""
     csv_path = path if path is not None else default_event_types_csv_path()
     if csv_path.is_file():
@@ -95,9 +106,22 @@ def load_event_type_specs(path: Path | None = None) -> list[tuple[str, str, str]
     return list(_BUILTIN_EVENT_TYPE_SPECS)
 
 
-def _specs_to_color_map(specs: list[tuple[str, str, str]]) -> dict[str, str]:
+def environmental_type_keys(specs: list[EventTypeSpec]) -> set[str]:
+    """Lowercase ``type`` and ``abbr`` tokens marked environmental in event-type specs."""
+    keys: set[str] = set()
+    for abbr, type_name, _color_hex, environmental in specs:
+        if not environmental:
+            continue
+        keys.add(type_name.strip().lower())
+        a = (abbr or "").strip()
+        if a:
+            keys.add(a.lower())
+    return keys
+
+
+def _specs_to_color_map(specs: list[EventTypeSpec]) -> dict[str, str]:
     m: dict[str, str] = dict(_TYPE_COLOR_ALIASES)
-    for abbr, type_name, color_hex in specs:
+    for abbr, type_name, color_hex, _environmental in specs:
         m[type_name.strip().lower()] = color_hex
         a = (abbr or "").strip()
         if a:

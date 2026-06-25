@@ -32,22 +32,25 @@ class AnnotationService:
         self.table_store = TableStore()
         self.annotations = pd.DataFrame()
         self.animal_names: list[str] = []
+        self.id_images_dir: str = ""
         self.table_path: Path | None = None
 
     def load_or_create_table(self, table_path: str | Path, animal_names_if_new: list[str]) -> None:
         path = Path(table_path)
         self.table_path = path
         if path.exists():
-            self.annotations, loaded_names = self.table_store.load(path)
+            self.annotations, loaded_names, loaded_id_images_dir = self.table_store.load(path)
             if loaded_names:
                 self.animal_names = loaded_names
             elif animal_names_if_new:
                 self.animal_names = animal_names_if_new
+            self.id_images_dir = loaded_id_images_dir
             return
 
         path.parent.mkdir(parents=True, exist_ok=True)
         self.annotations, self.animal_names = self.table_store.create_empty(animal_names_if_new)
-        self.table_store.save(path, self.annotations, self.animal_names)
+        self.id_images_dir = ""
+        self.table_store.save(path, self.annotations, self.animal_names, self.id_images_dir)
 
     def _event_record_to_row(self, event: EventRecord) -> dict:
         ny_tz = ZoneInfo("America/New_York")
@@ -110,7 +113,12 @@ class AnnotationService:
     def save(self) -> None:
         if self.table_path is None:
             raise ValueError("No table path configured.")
-        self.table_store.save(self.table_path, self.annotations, self.animal_names)
+        self.table_store.save(
+            self.table_path,
+            self.annotations,
+            self.animal_names,
+            self.id_images_dir,
+        )
 
     def start_frames(
         self,

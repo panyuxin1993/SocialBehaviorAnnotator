@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -16,15 +19,25 @@ from PySide6.QtWidgets import (
 
 from app.config_loader import parse_animal_names_xlsx, repo_config_dir
 
+_ID_IMAGE_DIR_CANDIDATES = ("id_images", "ID_images", "id_photos")
+
 
 class AnimalListEditor(QDialog):
-    """Dialog to edit a single-column list of animal names."""
+    """Dialog to edit animal names and the correlated ID images folder."""
 
-    def __init__(self, values: list[str], parent=None, default_xlsx_dir: str = "") -> None:
+    def __init__(
+        self,
+        values: list[str],
+        parent=None,
+        default_xlsx_dir: str = "",
+        id_images_dir: str = "",
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Edit animals")
-        self.resize(400, 300)
+        self.resize(520, 360)
         self.default_xlsx_dir = default_xlsx_dir
+        self._settings = QSettings("SocialBehaviorAnnotator", "SocialBehaviorAnnotator")
+        self._key_id_images_dir = "paths/id_images_dir"
 
         layout = QVBoxLayout(self)
 
@@ -35,10 +48,22 @@ class AnimalListEditor(QDialog):
         self._fill_table_from_names(values)
         layout.addWidget(self.table)
 
+        form = QFormLayout()
+        self._id_images_edit = QLineEdit()
+        self._id_images_edit.setPlaceholderText("Folder of ID images named by animal (e.g. rat616.jpg)…")
+        self._id_images_edit.setText((id_images_dir or "").strip())
+        btn_id_images = QPushButton("Browse…")
+        btn_id_images.clicked.connect(self._browse_id_images)
+        id_row = QHBoxLayout()
+        id_row.addWidget(self._id_images_edit)
+        id_row.addWidget(btn_id_images)
+        form.addRow("ID images folder:", id_row)
+        layout.addLayout(form)
+
         hint = QLabel(
             "Add, edit, or clear rows. Empty rows are ignored when saving. "
             "Load from Excel reads rat names from the first column of the first sheet "
-            "(e.g. rats_background.xlsx)."
+            "(e.g. rats_background.xlsx). ID images should use the same names as filenames."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -60,6 +85,50 @@ class AnimalListEditor(QDialog):
         buttons_row.addWidget(cancel_btn)
 
         layout.addLayout(buttons_row)
+
+    def _start_dir(self, current_text: str) -> str:
+        text = (current_text or "").strip()
+        if text:
+            p = Path(text).expanduser()
+            if p.exists():
+                return str(p if p.is_dir() else p.parent)
+            if p.parent.exists():
+                return str(p.parent)
+        if self.default_xlsx_dir:
+            base = Path(self.default_xlsx_dir)
+            if base.is_dir():
+                return str(base)
+            if base.parent.exists():
+                return str(base.parent)
+        scoped = str(self._settings.value(self._key_id_images_dir, "")).strip()
+        if scoped and Path(scoped).exists():
+            return scoped
+        return str(Path.home())
+
+    def _browse_id_images(self) -> None:
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Select ID images folder",
+            self._start_dir(self._id_images_edit.text()),
+        )
+        if path:
+            self._id_images_edit.setText(path)
+            self._settings.setValue(self._key_id_images_dir, path)
+
+    def _suggest_id_images_dir(self) -> None:
+        if self._id_images_edit.text().strip():
+            return
+        if not self.default_xlsx_dir:
+            return
+        base = Path(self.default_xlsx_dir)
+        search_dir = base if base.is_dir() else base.parent
+        if not search_dir.is_dir():
+            return
+        for name in _ID_IMAGE_DIR_CANDIDATES:
+            candidate = search_dir / name
+            if candidate.is_dir():
+                self._id_images_edit.setText(str(candidate))
+                return
 
     def _fill_table_from_names(self, names: list[str]) -> None:
         self.table.setRowCount(max(1, len(names)))
@@ -98,6 +167,7 @@ class AnimalListEditor(QDialog):
             )
             return
         self._fill_table_from_names(names)
+        self._suggest_id_images_dir()
 
     def values(self) -> list[str]:
         out: list[str] = []
@@ -116,3 +186,12 @@ class AnimalListEditor(QDialog):
                 seen.add(v)
                 unique.append(v)
         return unique
+
+    def id_images_dir(self) -> str:
+        return self._id_images_edit.text().strip()
+
+    def accept(self) -> None:
+        value = self.id_images_dir()
+        if value:
+            self._settings.setValue(self._key_id_images_dir, value)
+        super().accept()

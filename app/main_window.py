@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtCore import QEvent, QObject, Qt, QSettings
 from PySide6.QtGui import QCloseEvent, QKeyEvent
 from PySide6.QtWidgets import (
     QDialog,
@@ -155,7 +155,6 @@ class MainWindow(QMainWindow):
         timestamp_path = dialog.timestamp_path()
         table_path = dialog.annotation_path()
         tracking_path = dialog.tracking_path()
-        id_images_path = dialog.id_images_path()
 
         if not video_path:
             QMessageBox.warning(self, "Missing video", "Please set the video file path.")
@@ -194,11 +193,18 @@ class MainWindow(QMainWindow):
                         animal_names = [name.strip() for name in text.split(",") if name.strip()]
 
             self.annotation_service.load_or_create_table(table_path, animal_names)
+            id_images_dir = self._resolve_id_images_dir(
+                self.annotation_service.id_images_dir,
+                video_path=video_path,
+                table_path=table_path,
+            )
+            if id_images_dir:
+                self.annotation_service.id_images_dir = id_images_dir
             if creating_new_table:
                 self.control_panel.append_log(f"Created new annotation table: {table_path}")
             self._sync_tracking_to_control_panel()
             self.control_panel.set_animal_names(self.annotation_service.animal_names)
-            self.control_panel.set_id_images_dir(id_images_path or None)
+            self.control_panel.set_id_images_dir(self.annotation_service.id_images_dir or None)
             self.navigator_panel.ethogram.set_data(
                 self.annotation_service.annotations,
                 0,
@@ -208,6 +214,7 @@ class MainWindow(QMainWindow):
                 fps=self.video_service.fps,
                 type_colors=self.control_panel.event_type_color_map(),
                 type_legend_labels=self.control_panel.event_type_legend_label_map(),
+                environmental_types=self.control_panel.environmental_type_keys(),
             )
             self.navigator_panel.set_playback_fps(self.video_service.fps)
             self.navigator_panel.pause_playback()
@@ -222,11 +229,59 @@ class MainWindow(QMainWindow):
                     f"({self.tracking_service.row_count} rows, "
                     f"{len(self.tracking_service.subjects)} subjects)"
                 )
-            if id_images_path and Path(id_images_path).is_dir():
-                self.control_panel.append_log(f"ID images: {id_images_path}")
+            if self.annotation_service.id_images_dir and Path(self.annotation_service.id_images_dir).is_dir():
+                self.control_panel.append_log(f"ID images: {self.annotation_service.id_images_dir}")
         except Exception as exc:
             QMessageBox.critical(self, "Failed to load project", str(exc))
             self.control_panel.append_log(f"ERROR: load failed — {exc}")
+
+    @staticmethod
+    def _id_images_dir_candidates(search_dir: Path) -> list[Path]:
+        return [
+            search_dir / "id_images",
+            search_dir / "ID_images",
+            search_dir / "id_photos",
+        ]
+
+    def _resolve_id_images_dir(
+        self,
+        stored_dir: str,
+        *,
+        video_path: str,
+        table_path: str,
+    ) -> str:
+        stored = (stored_dir or "").strip()
+        if stored:
+            p = Path(stored).expanduser()
+            if p.is_dir():
+                return str(p)
+
+        settings = QSettings("SocialBehaviorAnnotator", "SocialBehaviorAnnotator")
+        from_csv = str(settings.value(f"paths/id_images_for/{table_path}", "")).strip()
+        if from_csv and Path(from_csv).expanduser().is_dir():
+            return str(Path(from_csv).expanduser())
+
+        video_parent = Path(video_path).parent
+        for candidate in self._id_images_dir_candidates(video_parent):
+            if candidate.is_dir():
+                return str(candidate)
+        table_parent = Path(table_path).parent
+        if table_parent != video_parent:
+            for candidate in self._id_images_dir_candidates(table_parent):
+                if candidate.is_dir():
+                    return str(candidate)
+        return stored
+
+    def _persist_id_images_dir_for_table(self, table_path: Path, id_images_dir: str) -> None:
+        if table_path.suffix.lower() != ".csv":
+            return
+        value = (id_images_dir or "").strip()
+        settings = QSettings("SocialBehaviorAnnotator", "SocialBehaviorAnnotator")
+        key = f"paths/id_images_for/{table_path}"
+        if value:
+            settings.setValue(key, value)
+        else:
+            settings.remove(key)
 
     @staticmethod
     def _navigation_shortcuts_blocked() -> bool:
@@ -418,6 +473,7 @@ class MainWindow(QMainWindow):
             fps=self.video_service.fps,
             type_colors=self.control_panel.event_type_color_map(),
             type_legend_labels=self.control_panel.event_type_legend_label_map(),
+            environmental_types=self.control_panel.environmental_type_keys(),
         )
         if event.editing_iloc is not None:
             iloc = event.editing_iloc
@@ -464,6 +520,7 @@ class MainWindow(QMainWindow):
             fps=self.video_service.fps,
             type_colors=self.control_panel.event_type_color_map(),
             type_legend_labels=self.control_panel.event_type_legend_label_map(),
+            environmental_types=self.control_panel.environmental_type_keys(),
         )
 
     def _edit_animals(self) -> None:
@@ -474,14 +531,27 @@ class MainWindow(QMainWindow):
             default_xlsx_dir = str(self.annotation_service.table_path.parent)
         elif self.video_service.video_path is not None:
             default_xlsx_dir = str(self.video_service.video_path.parent)
-        dialog = AnimalListEditor(current_animals, self, default_xlsx_dir=default_xlsx_dir)
+        dialog = AnimalListEditor(
+            current_animals,
+            self,
+            default_xlsx_dir=default_xlsx_dir,
+            id_images_dir=self.annotation_service.id_images_dir,
+        )
         if dialog.exec() != QDialog.Accepted:
             return
         new_animals = dialog.values()
         if not new_animals:
             return
+        new_id_images_dir = dialog.id_images_dir()
         self.annotation_service.animal_names = new_animals
+        self.annotation_service.id_images_dir = new_id_images_dir
         self.control_panel.set_animal_names(new_animals)
+        self.control_panel.set_id_images_dir(new_id_images_dir or None)
+        if self.annotation_service.table_path is not None:
+            self._persist_id_images_dir_for_table(
+                self.annotation_service.table_path,
+                new_id_images_dir,
+            )
         # Persist updated animal list metadata when possible.
         try:
             self.annotation_service.save()
