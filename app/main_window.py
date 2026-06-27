@@ -171,13 +171,15 @@ class MainWindow(QMainWindow):
         if not table_path:
             table_path = str(OpenProjectDialog._default_annotation_path(Path(video_path).parent))
 
+        table_file = AnnotationService.resolve_table_path(table_path, video_path=video_path)
+        table_path = str(table_file)
+
         try:
             self.video_service.load_video(video_path)
             self.timestamp_service.load_file(timestamp_path)
             self._load_or_clear_tracking(tracking_path)
 
             animal_names: list[str] = []
-            table_file = Path(table_path)
             creating_new_table = not table_file.exists()
             if creating_new_table:
                 if self.tracking_service.is_loaded and self.tracking_service.subjects:
@@ -192,7 +194,11 @@ class MainWindow(QMainWindow):
                     if ok and text.strip():
                         animal_names = [name.strip() for name in text.split(",") if name.strip()]
 
-            self.annotation_service.load_or_create_table(table_path, animal_names)
+            self.annotation_service.load_or_create_table(
+                table_path,
+                animal_names,
+                video_path=video_path,
+            )
             id_images_dir = self._resolve_id_images_dir(
                 self.annotation_service.id_images_dir,
                 video_path=video_path,
@@ -201,7 +207,9 @@ class MainWindow(QMainWindow):
             if id_images_dir:
                 self.annotation_service.id_images_dir = id_images_dir
             if creating_new_table:
-                self.control_panel.append_log(f"Created new annotation table: {table_path}")
+                self.control_panel.append_log(
+                    f"New annotation table will be created on first Submit event: {table_path}"
+                )
             self._sync_tracking_to_control_panel()
             self.control_panel.set_animal_names(self.annotation_service.animal_names)
             self.control_panel.set_id_images_dir(self.annotation_service.id_images_dir or None)
@@ -275,6 +283,7 @@ class MainWindow(QMainWindow):
     def _persist_id_images_dir_for_table(self, table_path: Path, id_images_dir: str) -> None:
         if table_path.suffix.lower() != ".csv":
             return
+        table_path = table_path.expanduser().resolve()
         value = (id_images_dir or "").strip()
         settings = QSettings("SocialBehaviorAnnotator", "SocialBehaviorAnnotator")
         key = f"paths/id_images_for/{table_path}"
@@ -305,12 +314,12 @@ class MainWindow(QMainWindow):
             return
 
         actual_index = int(self.video_service.current_frame_index)
-        dt_value, unix_value = self.timestamp_service.timestamp_for_frame(actual_index)
+        dt_value, unix_value, ts_raw = self.timestamp_service.timestamp_for_frame(actual_index)
         tracking_poses = self._tracking_poses_for_frame(actual_index)
         self._apply_tracking_overlay(tracking_poses, refresh=False)
         self.video_panel.set_frame(frame, actual_index, dt_value, unix_value)
         self.control_panel.set_current_frame_image(frame)
-        self.control_panel.set_current_time(actual_index, dt_value, unix_value)
+        self.control_panel.set_current_time(actual_index, dt_value, unix_value, ts_raw)
         self.navigator_panel.set_current_frame(actual_index, self.video_service.total_frames)
         self.navigator_panel.ethogram.set_playhead(actual_index)
         self.control_panel.update_kinematics_playhead(unix_value)
@@ -430,6 +439,7 @@ class MainWindow(QMainWindow):
             self.video_service.current_frame_index,
             self.timestamp_service.timestamps,
             max_frame_index=max_idx,
+            current_iloc=self.control_panel._editing_iloc,
         )
         if frame_index is not None:
             self._seek_to_frame(frame_index)
@@ -444,6 +454,7 @@ class MainWindow(QMainWindow):
             self.video_service.current_frame_index,
             self.timestamp_service.timestamps,
             max_frame_index=max_idx,
+            current_iloc=self.control_panel._editing_iloc,
         )
         if frame_index is not None:
             self._seek_to_frame(frame_index)
@@ -452,12 +463,15 @@ class MainWindow(QMainWindow):
 
     def _on_submit_event(self, event) -> None:
         try:
+            prev_rows = len(self.annotation_service.annotations)
             if event.editing_iloc is not None:
                 self.annotation_service.update_event_at_iloc(event.editing_iloc, event)
             else:
                 if not (event.event_id or "").strip():
                     event.event_id = self.annotation_service.generate_event_id()
                 self.annotation_service.append_event(event)
+                if len(self.annotation_service.annotations) <= prev_rows:
+                    raise RuntimeError("Event was not added to the annotation table.")
             self._save_annotations()
         except Exception as exc:
             QMessageBox.critical(self, "Save failed", str(exc))
@@ -489,9 +503,18 @@ class MainWindow(QMainWindow):
 
     def _save_annotations(self) -> None:
         try:
+            row_count = len(self.annotation_service.annotations)
+            if row_count == 0:
+                self.control_panel.append_log(
+                    "WARNING: no events in memory — use Submit event to save annotations."
+                )
             self.annotation_service.save()
+            table_path = self.annotation_service.table_path
+            path_text = str(table_path) if table_path is not None else "(unknown path)"
             self.statusBar().showMessage("Annotations saved.", 3000)
-            self.control_panel.append_log("Annotations saved to disk.")
+            self.control_panel.append_log(
+                f"Annotations saved to disk: {path_text} ({row_count} event{'s' if row_count != 1 else ''})"
+            )
         except Exception as exc:
             QMessageBox.warning(self, "Save failed", str(exc))
             self.control_panel.append_log(f"ERROR: save failed — {exc}")

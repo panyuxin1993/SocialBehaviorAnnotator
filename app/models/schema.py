@@ -17,9 +17,10 @@ ANNOTATION_COLUMNS = [
     "date",
     "start_time",
     "end_time",
+    "ts_start",
+    "ts_end",
     "type",
     "location",
-    "animal_location",
     *ROLE_COLUMNS,
     "other_notes",
 ]

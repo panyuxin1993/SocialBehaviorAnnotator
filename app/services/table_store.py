@@ -25,7 +25,7 @@ class TableStore:
         suffix = path.suffix.lower()
 
         if suffix == ".csv":
-            df = pd.read_csv(path)
+            df = pd.read_csv(path, encoding="utf-8-sig")
             names = self._infer_animal_names(df)
             return self._normalize(df), names, ""
 
@@ -38,6 +38,9 @@ class TableStore:
         df = pd.DataFrame(columns=ANNOTATION_COLUMNS)
         return df, animal_names
 
+    def normalize(self, frame: pd.DataFrame) -> pd.DataFrame:
+        return self._normalize(frame)
+
     def save(
         self,
         table_path: str | Path,
@@ -45,12 +48,13 @@ class TableStore:
         animal_names: list[str],
         id_images_dir: str = "",
     ) -> None:
-        path = Path(table_path)
+        path = Path(table_path).expanduser().resolve()
         suffix = path.suffix.lower()
         annotations = self._normalize(annotations)
+        path.parent.mkdir(parents=True, exist_ok=True)
 
         if suffix == ".csv":
-            annotations.to_csv(path, index=False)
+            self._write_csv(path, annotations)
             return
 
         if suffix in {".xlsx", ".xls"}:
@@ -58,6 +62,14 @@ class TableStore:
             return
 
         raise ValueError(f"Unsupported table extension: {suffix}")
+
+    def _write_csv(self, path: Path, annotations: pd.DataFrame) -> None:
+        annotations.to_csv(path, index=False, encoding="utf-8-sig")
+        with path.open("rb+") as handle:
+            handle.flush()
+            import os
+
+            os.fsync(handle.fileno())
 
     def _load_xlsx(self, path: Path) -> tuple[pd.DataFrame, list[str], str]:
         xls = pd.ExcelFile(path)
@@ -129,16 +141,14 @@ class TableStore:
         buckets = self._split_by_date(annotations)
 
         with pd.ExcelWriter(path, engine="openpyxl") as writer:
-            if not buckets:
-                annotations.to_excel(writer, sheet_name=self.schema.annotation_sheet_name, index=False)
-            else:
+            # Always keep a consolidated sheet so events are easy to find/export.
+            annotations.to_excel(writer, sheet_name=self.schema.annotation_sheet_name, index=False)
+            if buckets:
                 for date_key in sorted(buckets.keys(), key=lambda key: (key == "", key)):
+                    if not date_key:
+                        continue
                     chunk = buckets[date_key]
-                    sheet_name = (
-                        self._sheet_name_for_date(date_key)
-                        if date_key
-                        else self.schema.annotation_sheet_name
-                    )
+                    sheet_name = self._sheet_name_for_date(date_key)
                     chunk.to_excel(writer, sheet_name=sheet_name, index=False)
             metadata.to_excel(writer, sheet_name=self.schema.metadata_sheet_name, index=False)
 
@@ -232,7 +242,35 @@ class TableStore:
             if col not in df.columns:
                 df[col] = None
         df = df[ANNOTATION_COLUMNS]
-        return self._coerce_datetime_columns(df)
+        df = self._coerce_datetime_columns(df)
+        return self._coerce_text_columns(df)
+
+    @staticmethod
+    def _annotation_cell_to_str(value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, float) and pd.isna(value):
+            return ""
+        if isinstance(value, str):
+            return value
+        try:
+            if pd.isna(value):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        text = str(value).strip()
+        if text.lower() in {"nan", "nat", "none"}:
+            return ""
+        return text
+
+    def _coerce_text_columns(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """CSV/Excel often infer float64 for all-empty role columns; keep everything as text."""
+        if frame.empty:
+            return frame
+        df = frame.copy()
+        for col in df.columns:
+            df[col] = df[col].map(self._annotation_cell_to_str)
+        return df
 
     def _coerce_datetime_columns(self, frame: pd.DataFrame) -> pd.DataFrame:
         """Excel/CSV often yield midnight datetimes for ``date`` and timedelta-like ``start_time``."""

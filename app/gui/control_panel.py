@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -41,6 +40,7 @@ from app.config_loader import EventTypeSpec, environmental_type_keys, load_event
 from app.gui.colors import ANIMAL_COLORS
 from app.gui.kinematics_widget import KinematicsWidget
 from app.services.annotation_service import annotation_datetime_to_unix
+from app.services.annotation_datetime import annotation_ts_to_unix
 from app.services.kinematics_service import resolve_tracking_subject
 from app.services.tracking_service import TrackingService
 
@@ -55,7 +55,6 @@ class ControlPanel(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.animal_names: list[str] = []
-        self.pending_role_capture: Optional[Tuple[int, str]] = None
         self.current_frame_image: Optional[np.ndarray] = None
         self.start_frame: Optional[int] = None
         self.end_frame: Optional[int] = None
@@ -63,6 +62,8 @@ class ControlPanel(QWidget):
         self.end_datetime: Optional[datetime] = None
         self.start_unix: Optional[float] = None
         self.end_unix: Optional[float] = None
+        self.start_ts_raw: str = ""
+        self.end_ts_raw: str = ""
         #: Rows ``(abbr, type, #RRGGBB, environmental)`` aligned with ``event_type_combo`` items.
         self._event_type_specs: list[EventTypeSpec] = []
         self._roles_table_group: QGroupBox | None = None
@@ -132,7 +133,7 @@ class ControlPanel(QWidget):
         self.inspection_tabs = QTabWidget()
         zoom_page = QWidget()
         zoom_layout = QVBoxLayout(zoom_page)
-        self.zoom_label = QLabel("Click frame to inspect region")
+        self.zoom_label = QLabel("Click video to inspect region")
         self.zoom_label.setMinimumHeight(180)
         self.zoom_label.setAlignment(Qt.AlignCenter)
         self.zoom_factor = QSpinBox()
@@ -287,8 +288,7 @@ class ControlPanel(QWidget):
         self.event_location_combo = QComboBox()
         self.event_location_combo.addItems(["left", "right", "door"])
         self.event_location_combo.setToolTip(
-            "Arena / site for this event (saved in the annotation table ``location`` column). "
-            "Role click coordinates are saved in ``animal_location``."
+            "Arena / site for this event (saved in the annotation table ``location`` column)."
         )
         layout.addRow("Event location", self.event_location_combo)
 
@@ -701,23 +701,16 @@ class ControlPanel(QWidget):
                 return
 
         if item.checkState() == Qt.Checked:
-            self.pending_role_capture = (item.row(), role)
             self.name_table.selectRow(item.row())
-            self.zoom_label.setText(f"Click video to place {role} for {self.animal_names[item.row()]}")
         if role in ("initiator", "victim"):
             self._emit_kinematics_refresh()
             if self._zoom_center is None:
                 self._refresh_zoom_preview()
 
     def handle_frame_click_for_role(self, x: float, y: float) -> None:
+        """Update zoom preview from a video click (optional inspection only)."""
         self._zoom_center = (x, y)
         self._update_zoom_preview(x, y)
-        if self.pending_role_capture is None:
-            return
-        row, role = self.pending_role_capture
-        self.pending_role_capture = None
-        self.roles_table.item(row, ROLE_TO_COLUMN[role]).setData(Qt.UserRole, (x, y))
-        self.zoom_label.setText(f"Captured {role} for {self.animal_names[row]} at ({x:.3f}, {y:.3f})")
 
     def set_current_frame_image(self, frame: np.ndarray) -> None:
         self.current_frame_image = frame
@@ -812,10 +805,11 @@ class ControlPanel(QWidget):
             idx = hash(subject_id) % len(ANIMAL_COLORS)
         return QColor(ANIMAL_COLORS[idx % len(ANIMAL_COLORS)])
 
-    def set_current_time(self, frame: int, dt_value: str, unix_value: float) -> None:
+    def set_current_time(self, frame: int, dt_value: str, unix_value: float, ts_raw: str = "") -> None:
         self._current_frame = frame
         self._current_dt = dt_value
         self._current_unix = unix_value
+        self._current_ts_raw = ts_raw
         self._refresh_zoom_preview()
 
     def _refresh_zoom_preview(self) -> None:
@@ -865,7 +859,10 @@ class ControlPanel(QWidget):
         self.start_frame = self._current_frame
         self.start_datetime = datetime.fromisoformat(self._current_dt) if self._current_dt else None
         self.start_unix = self._current_unix
-        self.start_time_edit.setText(f"{self._current_dt} ({self._current_unix:.6f}) frame={self.start_frame}")
+        self.start_ts_raw = getattr(self, "_current_ts_raw", "") or ""
+        self.start_time_edit.setText(
+            f"{self._current_dt} ({self._current_unix:.6f}) frame={self.start_frame}"
+        )
         self._emit_kinematics_refresh()
 
     def _set_end_time_from_current(self) -> None:
@@ -875,7 +872,10 @@ class ControlPanel(QWidget):
         self.end_frame = self._current_frame
         self.end_datetime = datetime.fromisoformat(self._current_dt) if self._current_dt else None
         self.end_unix = self._current_unix
-        self.end_time_edit.setText(f"{self._current_dt} ({self._current_unix:.6f}) frame={self.end_frame}")
+        self.end_ts_raw = getattr(self, "_current_ts_raw", "") or ""
+        self.end_time_edit.setText(
+            f"{self._current_dt} ({self._current_unix:.6f}) frame={self.end_frame}"
+        )
         self._emit_kinematics_refresh()
 
     def _submit_event(self) -> None:
@@ -915,7 +915,6 @@ class ControlPanel(QWidget):
                 selection.roles[role] = selected
                 if selected and role == "initiator":
                     initiator_count += 1
-                selection.role_points[role] = item.data(Qt.UserRole)
             animals.append(selection)
 
         if initiator_count < 1 and not self._current_event_type_environmental():
@@ -930,6 +929,8 @@ class ControlPanel(QWidget):
             end_datetime=self.end_datetime,
             start_unix=self.start_unix,
             end_unix=self.end_unix,
+            start_ts_raw=self.start_ts_raw,
+            end_ts_raw=self.end_ts_raw,
             event_location=self.event_location_combo.currentText().strip() or "left",
             notes=self.notes_edit.toPlainText().strip(),
             animals=animals,
@@ -949,6 +950,8 @@ class ControlPanel(QWidget):
         self.end_datetime = None
         self.start_unix = None
         self.end_unix = None
+        self.start_ts_raw = ""
+        self.end_ts_raw = ""
         self.start_time_edit.clear()
         self.end_time_edit.clear()
         self.notes_edit.clear()
@@ -958,7 +961,6 @@ class ControlPanel(QWidget):
             for role in ROLE_COLUMNS:
                 item = self.roles_table.item(row, ROLE_TO_COLUMN[role])
                 item.setCheckState(Qt.Unchecked)
-                item.setData(Qt.UserRole, None)
         self.roles_table.blockSignals(False)
         self._emit_kinematics_refresh()
 
@@ -978,49 +980,6 @@ class ControlPanel(QWidget):
                 return
         self.event_location_combo.setCurrentIndex(0)
 
-    @staticmethod
-    def _parse_xy_string(s: str) -> Optional[Tuple[float, float]]:
-        try:
-            parts = [p.strip() for p in str(s).split(",")]
-            if len(parts) != 2:
-                return None
-            return float(parts[0]), float(parts[1])
-        except (TypeError, ValueError):
-            return None
-
-    def _clear_role_points(self) -> None:
-        self.roles_table.blockSignals(True)
-        try:
-            for row in range(self.roles_table.rowCount()):
-                for role in ROLE_COLUMNS:
-                    item = self.roles_table.item(row, ROLE_TO_COLUMN[role])
-                    if item is not None:
-                        item.setData(Qt.UserRole, None)
-        finally:
-            self.roles_table.blockSignals(False)
-
-    def _apply_role_points_payload(self, payload: dict) -> None:
-        if not self.animal_names:
-            return
-        self.roles_table.blockSignals(True)
-        try:
-            for row, name in enumerate(self.animal_names):
-                for role in ROLE_COLUMNS:
-                    item = self.roles_table.item(row, ROLE_TO_COLUMN[role])
-                    if item is None:
-                        continue
-                    inner = payload.get(role)
-                    if not isinstance(inner, dict):
-                        continue
-                    raw = inner.get(name)
-                    if raw is None:
-                        continue
-                    pt = self._parse_xy_string(raw) if isinstance(raw, str) else None
-                    if pt is not None:
-                        item.setData(Qt.UserRole, pt)
-        finally:
-            self.roles_table.blockSignals(False)
-
     def _fill_timing_from_event(self, event: dict, seek_frame: Optional[int]) -> None:
         ny = ZoneInfo("America/New_York")
         date_v = self._event_field_str(event, "date")
@@ -1029,7 +988,12 @@ class ControlPanel(QWidget):
 
         self.start_frame = seek_frame
 
-        u_s = annotation_datetime_to_unix(date_v, st_v) if date_v else annotation_datetime_to_unix(st_v)
+        self.start_ts_raw = self._event_field_str(event, "ts_start")
+        self.end_ts_raw = self._event_field_str(event, "ts_end")
+
+        u_s = annotation_ts_to_unix(self.start_ts_raw) if self.start_ts_raw else None
+        if u_s is None:
+            u_s = annotation_datetime_to_unix(date_v, st_v) if date_v else annotation_datetime_to_unix(st_v)
         if u_s is not None:
             self.start_unix = float(u_s)
             self.start_datetime = datetime.fromtimestamp(self.start_unix, tz=ny).replace(tzinfo=None)
@@ -1042,8 +1006,10 @@ class ControlPanel(QWidget):
             self.start_unix = None
             self.start_time_edit.setText(st_v)
 
-        if et_v:
-            u_e = annotation_datetime_to_unix(date_v, et_v) if date_v else annotation_datetime_to_unix(et_v)
+        if et_v or self.end_ts_raw:
+            u_e = annotation_ts_to_unix(self.end_ts_raw) if self.end_ts_raw else None
+            if u_e is None:
+                u_e = annotation_datetime_to_unix(date_v, et_v) if date_v else annotation_datetime_to_unix(et_v)
             if u_e is not None:
                 self.end_unix = float(u_e)
                 self.end_datetime = datetime.fromtimestamp(self.end_unix, tz=ny).replace(tzinfo=None)
@@ -1070,7 +1036,6 @@ class ControlPanel(QWidget):
                     item = self.roles_table.item(row, ROLE_TO_COLUMN[role])
                     if item is not None:
                         item.setCheckState(Qt.Unchecked)
-                        item.setData(Qt.UserRole, None)
             for role in ROLE_COLUMNS:
                 raw = self._event_field_str(event, role)
                 if not raw:
@@ -1113,33 +1078,10 @@ class ControlPanel(QWidget):
         self._apply_role_columns_from_event(event)
 
         loc_raw = self._event_field_str(event, "location")
-        animal_raw = self._event_field_str(event, "animal_location")
-        payload: dict | None = None
-
-        if animal_raw:
-            try:
-                p = json.loads(animal_raw)
-                if isinstance(p, dict) and p:
-                    payload = p
-            except json.JSONDecodeError:
-                pass
-
-        if payload is None and loc_raw:
-            try:
-                p = json.loads(loc_raw)
-                if isinstance(p, dict) and p and all(isinstance(v, dict) for v in p.values()):
-                    payload = p
-                    loc_raw = ""
-            except json.JSONDecodeError:
-                pass
-
         if loc_raw:
             self._set_event_location_combo(loc_raw)
         else:
             self.event_location_combo.setCurrentIndex(0)
-
-        if payload is not None:
-            self._apply_role_points_payload(payload)
 
         self._select_default_animal_row()
         self._emit_kinematics_refresh()

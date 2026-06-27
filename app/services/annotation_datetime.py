@@ -12,6 +12,34 @@ _DATE_ONLY_US_RE = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")
 _TIME_ONLY_RE = re.compile(r"^\d{1,2}:\d{2}(:\d{2})?(\.\d+)?$")
 
 
+def annotation_ts_to_unix(value: object) -> float | None:
+    """Parse ``ts_start`` / ``ts_end`` cells to Unix seconds (nanoseconds or seconds)."""
+    if value is None:
+        return None
+    try:
+        if isinstance(value, float) and pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "nat", "none"}:
+        return None
+    try:
+        val = float(text)
+    except ValueError:
+        return None
+    if val > 1e12:
+        return val / 1_000_000_000.0
+    return val
+
+
+def annotation_unix_to_ts_nanos(unix: float | None) -> str:
+    """Format Unix seconds for ``ts_start`` / ``ts_end`` columns (nanoseconds since epoch)."""
+    if unix is None:
+        return ""
+    return str(int(round(float(unix) * 1_000_000_000)))
+
+
 def looks_like_full_datetime(s: str) -> bool:
     """True if string encodes calendar date and clock time (not date-only or time-only)."""
     s = s.strip()

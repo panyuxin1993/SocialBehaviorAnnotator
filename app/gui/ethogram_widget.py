@@ -190,10 +190,25 @@ class EthogramWidget(QWidget):
 
     def set_environmental_types(self, keys: set[str] | None) -> None:
         self._environmental_types = {str(k).strip().lower() for k in (keys or set()) if str(k).strip()}
+        self._timeline_cache = None
+
+    def _event_type_key(self, row) -> str:
+        return str(row.get("type", row.get("event_type", ""))).strip().lower()
 
     def _is_environmental_event(self, row) -> bool:
-        """Arena-wide stimulus events have no initiator and span all ethogram lanes."""
+        """Arena-wide stimulus events span all ethogram lanes."""
+        event_type = self._event_type_key(row)
+        if event_type and event_type in self._environmental_types:
+            return True
         return not self._names_in_cell(row.get("initiator", ""))
+
+    def _ethogram_fill_color(self, base_color: QColor, *, alpha: int = 210) -> QColor:
+        """Ensure light type colors remain visible on the white lane background."""
+        c = QColor(base_color)
+        if c.lightness() > 215:
+            c = QColor(base_color).darker(125)
+        c.setAlpha(alpha)
+        return c
 
     def _color_for_event_type(self, event_type: str) -> QColor:
         key = event_type.strip().lower()
@@ -375,6 +390,7 @@ class EthogramWidget(QWidget):
                     base_color = self._color_for_event_type(event_type)
                     initiators = self._names_in_cell(row.get("initiator", ""))
                     victims = self._names_in_cell(row.get("victim", ""))
+                    is_environmental = self._is_environmental_event(row)
 
                     xa = self._frame_to_cache_x(start_f, cache_w, last_f)
                     xb = self._frame_to_cache_x(end_f, cache_w, last_f) + 1
@@ -382,13 +398,14 @@ class EthogramWidget(QWidget):
                         xb = min(cache_w - 1, xa + 1)
                     patch_w = max(2, xb - xa)
 
-                    if self._is_environmental_event(row):
+                    if is_environmental:
                         y0 = 2
                         y1 = cache_h - 2
                         rh = max(1, y1 - y0)
-                        c = QColor(base_color)
-                        c.setAlpha(210)
+                        c = self._ethogram_fill_color(base_color)
                         p.fillRect(xa, y0, patch_w, rh, c)
+                        p.setPen(QPen(QColor(0, 0, 0, 70), 1))
+                        p.drawRect(xa, y0, max(1, patch_w - 1), max(1, rh - 1))
                         continue
 
                     if animals:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -12,6 +11,8 @@ from app.models.event import EventRecord
 from app.models.schema import ROLE_COLUMNS
 from app.services.annotation_datetime import (
     annotation_datetime_to_unix,
+    annotation_ts_to_unix,
+    annotation_unix_to_ts_nanos,
     format_annotation_date,
     format_annotation_time,
     looks_like_full_datetime,
@@ -35,8 +36,29 @@ class AnnotationService:
         self.id_images_dir: str = ""
         self.table_path: Path | None = None
 
-    def load_or_create_table(self, table_path: str | Path, animal_names_if_new: list[str]) -> None:
-        path = Path(table_path)
+    @staticmethod
+    def resolve_table_path(table_path: str | Path, *, video_path: str | Path | None = None) -> Path:
+        """Return an absolute annotation table path.
+
+        Relative paths are resolved against the video directory when provided,
+        otherwise against the current working directory.
+        """
+        path = Path(table_path).expanduser()
+        if not path.is_absolute():
+            base = Path(video_path).expanduser().resolve().parent if video_path else Path.cwd()
+            path = (base / path).resolve()
+        else:
+            path = path.resolve()
+        return path
+
+    def load_or_create_table(
+        self,
+        table_path: str | Path,
+        animal_names_if_new: list[str],
+        *,
+        video_path: str | Path | None = None,
+    ) -> None:
+        path = self.resolve_table_path(table_path, video_path=video_path)
         self.table_path = path
         if path.exists():
             self.annotations, loaded_names, loaded_id_images_dir = self.table_store.load(path)
@@ -50,7 +72,7 @@ class AnnotationService:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.annotations, self.animal_names = self.table_store.create_empty(animal_names_if_new)
         self.id_images_dir = ""
-        self.table_store.save(path, self.annotations, self.animal_names, self.id_images_dir)
+        # Defer writing the file until the first event is saved.
 
     def _event_record_to_row(self, event: EventRecord) -> dict:
         ny_tz = ZoneInfo("America/New_York")
@@ -58,20 +80,10 @@ class AnnotationService:
         end_dt = self._to_ny_datetime(event.end_datetime, ny_tz) if event.end_datetime else None
 
         role_to_animals: dict[str, list[str]] = {role: [] for role in ROLE_COLUMNS}
-        role_to_points: dict[str, dict[str, tuple[float, float]]] = {role: {} for role in ROLE_COLUMNS}
         for animal in event.animals:
             for role in ROLE_COLUMNS:
                 if animal.roles.get(role):
                     role_to_animals[role].append(animal.animal_name)
-                    point = animal.role_points.get(role)
-                    if point is not None:
-                        role_to_points[role][animal.animal_name] = point
-
-        location_payload = {
-            role: {name: f"{point[0]:.3f},{point[1]:.3f}" for name, point in points.items()}
-            for role, points in role_to_points.items()
-            if points
-        }
 
         arena = (event.event_location or "left").strip() or "left"
 
@@ -80,9 +92,12 @@ class AnnotationService:
             "date": start_dt.strftime("%Y-%m-%d"),
             "start_time": start_dt.isoformat(sep=" ", timespec="milliseconds"),
             "end_time": end_dt.isoformat(sep=" ", timespec="milliseconds") if end_dt else "",
+            "ts_start": (event.start_ts_raw or "").strip()
+            or annotation_unix_to_ts_nanos(event.start_unix),
+            "ts_end": (event.end_ts_raw or "").strip()
+            or annotation_unix_to_ts_nanos(event.end_unix),
             "type": event.event_type,
             "location": arena,
-            "animal_location": json.dumps(location_payload, ensure_ascii=True) if location_payload else "",
             "other_notes": event.notes,
         }
         for role in ROLE_COLUMNS:
@@ -91,7 +106,17 @@ class AnnotationService:
 
     def append_event(self, event: EventRecord) -> None:
         row = self._event_record_to_row(event)
-        self.annotations = pd.concat([self.annotations, pd.DataFrame([row])], ignore_index=True)
+        new_row = self.table_store.normalize(pd.DataFrame([row]))
+        if new_row.empty:
+            raise RuntimeError("Failed to build annotation row for this event.")
+        if self.annotations.empty:
+            self.annotations = new_row.copy()
+        else:
+            self.annotations = self.table_store.normalize(
+                pd.concat([self.annotations, new_row], ignore_index=True)
+            )
+        if len(self.annotations) <= 0:
+            raise RuntimeError("Failed to append annotation row.")
 
     def update_event_at_iloc(self, iloc: int, event: EventRecord) -> None:
         n = len(self.annotations)
@@ -102,10 +127,13 @@ class AnnotationService:
             prev = self.annotations.iloc[iloc].get("event_id")
             if prev is not None and not (isinstance(prev, float) and pd.isna(prev)):
                 row["event_id"] = str(prev).strip()
-        idx = self.annotations.index[iloc]
-        for col, val in row.items():
-            if col in self.annotations.columns:
-                self.annotations.at[idx, col] = val
+        new_row = self.table_store.normalize(pd.DataFrame([row]))
+        parts = [
+            self.annotations.iloc[:iloc],
+            new_row,
+            self.annotations.iloc[iloc + 1 :],
+        ]
+        self.annotations = self.table_store.normalize(pd.concat(parts, ignore_index=True))
 
     def generate_event_id(self) -> str:
         return uuid4().hex[:10]
@@ -113,12 +141,39 @@ class AnnotationService:
     def save(self) -> None:
         if self.table_path is None:
             raise ValueError("No table path configured.")
+        path = Path(self.table_path).expanduser().resolve()
+        self.table_path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.annotations = self.table_store.normalize(self.annotations)
+        expected_rows = len(self.annotations)
+
+        if expected_rows == 0 and path.exists() and path.suffix.lower() == ".csv":
+            try:
+                existing = pd.read_csv(path, encoding="utf-8-sig")
+                if len(existing) > 0:
+                    raise ValueError(
+                        f"Refusing to overwrite {path.name} ({len(existing)} existing events) "
+                        "with an empty in-memory table. Reload the project or use "
+                        "Submit event before saving."
+                    )
+            except pd.errors.EmptyDataError:
+                pass
+
         self.table_store.save(
-            self.table_path,
+            path,
             self.annotations,
             self.animal_names,
             self.id_images_dir,
         )
+
+        if path.suffix.lower() == ".csv" and expected_rows > 0:
+            written = pd.read_csv(path, encoding="utf-8-sig")
+            if len(written) != expected_rows:
+                raise OSError(
+                    f"Wrote {expected_rows} event(s) to {path}, but the file now contains "
+                    f"{len(written)} row(s). Close the file if it is open in Excel/Numbers "
+                    "and try again."
+                )
 
     def start_frames(
         self,
@@ -134,89 +189,101 @@ class AnnotationService:
                 starts.append(frame)
         return sorted(set(starts))
 
-    def next_event_from_current_time(
+    def _sorted_event_starts(
         self,
-        current_frame: int,
         video_timestamps: list[float] | None = None,
         max_frame_index: int | None = None,
-    ) -> tuple[int | None, dict | None, int | None]:
-        """Jump target: event with the smallest start time strictly after the current frame's time."""
-        cur_u = self._unix_at_frame(current_frame, video_timestamps, max_frame_index)
-        if cur_u is None:
-            return None, None, None
-        # Primary rule: choose the nearest event that maps to a strictly later frame.
-        # This avoids re-selecting the same event when the current frame timestamp is
-        # slightly earlier than that event's parsed start_time.
-        best_u: float | None = None
-        best_frame: int | None = None
-        best_row: pd.Series | None = None
-        best_iloc: int | None = None
+    ) -> list[tuple[float, int, int, pd.Series]]:
+        """Return ``(start_unix, iloc, start_frame, row)`` sorted by time then table order."""
+        items: list[tuple[float, int, int, pd.Series]] = []
         for iloc in range(len(self.annotations)):
             row = self.annotations.iloc[iloc]
             eu = self._row_start_unix(row)
             if eu is None:
                 continue
-            if eu <= cur_u:
-                continue
             frame = self._frame_from_row(row, video_timestamps, max_frame_index=max_frame_index)
             if frame is None:
                 continue
-            if frame <= int(current_frame):
-                continue
-            if best_u is None or eu < best_u:
-                best_u = eu
-                best_frame = int(frame)
-                best_row = row
-                best_iloc = iloc
-        if best_row is None:
-            # Fallback: keep prior strict-time behavior if no later-frame candidate exists.
-            # This preserves behavior for unusual timestamp/frame mappings.
-            for iloc in range(len(self.annotations)):
-                row = self.annotations.iloc[iloc]
-                eu = self._row_start_unix(row)
-                if eu is None or eu <= cur_u:
-                    continue
-                frame = self._frame_from_row(row, video_timestamps, max_frame_index=max_frame_index)
-                if frame is None:
-                    continue
-                if best_u is None or eu < best_u:
-                    best_u = eu
-                    best_frame = int(frame)
-                    best_row = row
-                    best_iloc = iloc
-        if best_row is None or best_frame is None or best_iloc is None:
+            items.append((float(eu), iloc, int(frame), row))
+        items.sort(key=lambda item: (item[0], item[1]))
+        return items
+
+    @staticmethod
+    def _event_index_at_or_before(
+        items: list[tuple[float, int, int, pd.Series]],
+        cur_u: float,
+    ) -> int | None:
+        """Index of the last event whose start time is <= *cur_u*."""
+        idx: int | None = None
+        for i, (eu, _iloc, _frame, _row) in enumerate(items):
+            if eu <= cur_u:
+                idx = i
+            else:
+                break
+        return idx
+
+    def next_event_from_current_time(
+        self,
+        current_frame: int,
+        video_timestamps: list[float] | None = None,
+        max_frame_index: int | None = None,
+        *,
+        current_iloc: int | None = None,
+    ) -> tuple[int | None, dict | None, int | None]:
+        """Jump target: next event by start time after the current frame timestamp."""
+        items = self._sorted_event_starts(video_timestamps, max_frame_index=max_frame_index)
+        if not items:
             return None, None, None
-        return best_frame, best_row.to_dict(), best_iloc
+
+        if current_iloc is not None:
+            for i, (_eu, iloc, frame, row) in enumerate(items):
+                if iloc == current_iloc:
+                    if i + 1 >= len(items):
+                        return None, None, None
+                    _eu, next_iloc, frame, row = items[i + 1]
+                    return frame, row.to_dict(), next_iloc
+            return None, None, None
+
+        cur_u = self._unix_at_frame(current_frame, video_timestamps, max_frame_index)
+        if cur_u is None:
+            return None, None, None
+        idx = self._event_index_at_or_before(items, float(cur_u))
+        next_idx = 0 if idx is None else idx + 1
+        if next_idx >= len(items):
+            return None, None, None
+        _eu, iloc, frame, row = items[next_idx]
+        return frame, row.to_dict(), iloc
 
     def previous_event_from_current_time(
         self,
         current_frame: int,
         video_timestamps: list[float] | None = None,
         max_frame_index: int | None = None,
+        *,
+        current_iloc: int | None = None,
     ) -> tuple[int | None, dict | None, int | None]:
-        """Jump target: event with the largest start time strictly before the current frame's time."""
+        """Jump target: previous event by start time before the current frame timestamp."""
+        items = self._sorted_event_starts(video_timestamps, max_frame_index=max_frame_index)
+        if not items:
+            return None, None, None
+
+        if current_iloc is not None:
+            for i, (_eu, iloc, frame, row) in enumerate(items):
+                if iloc == current_iloc:
+                    if i <= 0:
+                        return None, None, None
+                    _eu, prev_iloc, frame, row = items[i - 1]
+                    return frame, row.to_dict(), prev_iloc
+            return None, None, None
+
         cur_u = self._unix_at_frame(current_frame, video_timestamps, max_frame_index)
         if cur_u is None:
             return None, None, None
-        best_u: float | None = None
-        best_row: pd.Series | None = None
-        best_iloc: int | None = None
-        for iloc in range(len(self.annotations)):
-            row = self.annotations.iloc[iloc]
-            eu = self._row_start_unix(row)
-            if eu is None:
-                continue
-            if eu < cur_u:
-                if best_u is None or eu > best_u:
-                    best_u = eu
-                    best_row = row
-                    best_iloc = iloc
-        if best_row is None or best_iloc is None:
+        idx = self._event_index_at_or_before(items, float(cur_u))
+        if idx is None or idx <= 0:
             return None, None, None
-        frame = self._frame_from_row(best_row, video_timestamps, max_frame_index=max_frame_index)
-        if frame is None:
-            return None, None, None
-        return int(frame), best_row.to_dict(), best_iloc
+        _eu, iloc, frame, row = items[idx - 1]
+        return frame, row.to_dict(), iloc
 
     def next_event_start_frame(
         self,
@@ -273,7 +340,10 @@ class AnnotationService:
         return float(video_timestamps[fi])
 
     def _row_start_unix(self, row: pd.Series) -> float | None:
-        """Parse this row's event start to Unix seconds (``date`` + ``start_time`` when split)."""
+        """Parse this row's event start to Unix seconds (``ts_start`` or ``date`` + ``start_time``)."""
+        u = annotation_ts_to_unix(row.get("ts_start"))
+        if u is not None:
+            return float(u)
         st = row.get("start_time")
         if st is None:
             return None

@@ -32,6 +32,9 @@ class EventRecord:
     end_datetime: Optional[datetime]
     start_unix: float
     end_unix: Optional[float]
+    #: Exact timestamp from the ts file at ``start_frame`` / ``end_frame`` (written to CSV as-is).
+    start_ts_raw: str = ""
+    end_ts_raw: str = ""
     #: Arena / site: ``left``, ``right``, or ``door`` (stored in ``location`` column).
     event_location: str = "left"
     notes: str = ""
